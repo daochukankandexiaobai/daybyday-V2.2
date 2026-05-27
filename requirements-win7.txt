@@ -1,0 +1,5 @@
+﻿# Win7 兼容分支运行依赖（Python 3.8.x）
+PySide2==5.15.2.1
+openpyxl==3.1.2
+et-xmlfile==1.1.0
+matplotlib==3.5.3

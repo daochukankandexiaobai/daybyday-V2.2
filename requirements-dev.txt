@@ -1,0 +1,4 @@
+﻿-r requirements-win7.txt
+
+# Win7 兼容分支打包工具（Python 3.8 可用）
+pyinstaller==5.13.2
