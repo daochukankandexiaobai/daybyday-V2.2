@@ -71,6 +71,7 @@ class TeamService:
         team_manager_name: str,
         settlement_cycle_code: str,
         members: list[dict],
+        sync_cycle_targets: bool = True,
     ) -> tuple[bool, str, int | None]:
         region = region.strip()
         team_name = team_name.strip()
@@ -95,16 +96,14 @@ class TeamService:
                 return False, f"客户经理名单存在重复姓名：{name}", None
             seen_names.add(key)
 
-            ok, target_value, err = validate_non_negative_decimal_input(str(item.get("target_amount", "")).strip())
-            if not ok:
-                return False, f"客户经理[{name}]结算周期目标无效：{err}", None
+            normalized = {"account_manager_name": name}
+            if sync_cycle_targets:
+                ok, target_value, err = validate_non_negative_decimal_input(str(item.get("target_amount", "")).strip())
+                if not ok:
+                    return False, f"客户经理[{name}]结算周期目标无效：{err}", None
+                normalized["target_amount"] = safe_decimal(target_value)
 
-            normalized_members.append(
-                {
-                    "account_manager_name": name,
-                    "target_amount": safe_decimal(target_value),
-                }
-            )
+            normalized_members.append(normalized)
 
         if not normalized_members:
             return False, "客户经理名单不能为空", None
@@ -117,13 +116,14 @@ class TeamService:
             name = item["account_manager_name"]
             manager_id = self.account_manager_repo.ensure_member(saved_team_id, name, now)
             keep_ids.append(manager_id)
-            self.cycle_target_repo.upsert_target(
-                team_id=saved_team_id,
-                account_manager_id=manager_id,
-                settlement_cycle_code=settlement_cycle_code,
-                target_amount=safe_decimal(item.get("target_amount", 0)),
-                now=now,
-            )
+            if sync_cycle_targets:
+                self.cycle_target_repo.upsert_target(
+                    team_id=saved_team_id,
+                    account_manager_id=manager_id,
+                    settlement_cycle_code=settlement_cycle_code,
+                    target_amount=safe_decimal(item.get("target_amount", 0)),
+                    now=now,
+                )
 
         self.account_manager_repo.deactivate_missing(saved_team_id, keep_ids=keep_ids, now=now)
         self.set_current_team_id(saved_team_id)

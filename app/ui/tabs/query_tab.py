@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.config.field_profiles import PROFILE_QUERY_SUMMARY_TABLE, get_profile_field_keys
 from app.config.field_registry import DATA_TYPE_AMOUNT, DATA_TYPE_INT, DATA_TYPE_PERCENT, get_field_spec
 from app.ui.layout_profile import LayoutProfile
 from app.utils.format_utils import format_int, format_money, format_percent
-from app.utils.qt_compat import QDate, Qt
+from app.utils.qt_compat import QColor, QDate, Qt
 from app.utils.qt_compat import (
     QComboBox,
     QDateEdit,
@@ -40,14 +42,28 @@ class QueryTab(QWidget):
         record_service,
         team_service,
         analytics_service=None,  # 兼容旧注入，当前页不再承载分析模块
+        target_alert_service=None,
+        star_customer_alert_service=None,
+        settings_service=None,
+        report_image_service=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.record_service = record_service
         self.team_service = team_service
+        self.target_alert_service = target_alert_service
+        self.star_customer_alert_service = star_customer_alert_service
+        self.settings_service = settings_service
+        self.report_image_service = report_image_service
         self.week_options: list[dict[str, str]] = []
         self._updating_team_list = False
         self._layout_profile: LayoutProfile | None = None
+        self._current_render_rows: list[list[str]] = []
+        self._current_cell_styles: list[list[dict]] = []
+        self._current_alert_summary: list[str] = []
+        self._current_query_mode = ""
+        self._current_query_start = ""
+        self._current_query_end = ""
 
         self._build_ui()
         self.reload_teams()
@@ -101,6 +117,9 @@ class QueryTab(QWidget):
         self.query_btn.setProperty("buttonRole", "primary")
         self.reset_btn = QPushButton("重置")
         self.reset_btn.setProperty("buttonRole", "secondary")
+        self.export_png_btn = QPushButton("导出PNG总图")
+        self.export_png_btn.setProperty("buttonRole", "primary")
+        self.export_png_btn.setEnabled(self.report_image_service is not None)
 
         self.mode_label = QLabel("模式")
         self.team_label = QLabel("团队（多选）")
@@ -128,6 +147,7 @@ class QueryTab(QWidget):
         btns.setSpacing(8)
         btns.addWidget(self.query_btn)
         btns.addWidget(self.reset_btn)
+        btns.addWidget(self.export_png_btn)
         btns.addStretch()
         self.filter_grid.addLayout(btns, 0, 6, 1, 1)
 
@@ -214,6 +234,7 @@ class QueryTab(QWidget):
         self.week_next_btn.clicked.connect(self.on_next_week)
         self.query_btn.clicked.connect(self.on_query)
         self.reset_btn.clicked.connect(self.on_reset)
+        self.export_png_btn.clicked.connect(self.on_export_png_bundle)
 
     def _checked_team_ids(self) -> list[int]:
         ids: list[int] = []
@@ -344,6 +365,125 @@ class QueryTab(QWidget):
     def _build_table_values(self, row: dict) -> list[str]:
         return [self._format_field_value(field_key, row) for field_key in self.FIELD_KEYS]
 
+    @staticmethod
+    def _status_color(status_code: str) -> QColor | None:
+        colors = {
+            "lagging": QColor("#FDE2E2"),
+            "warning": QColor("#FFF4CC"),
+            "ok": QColor("#DCFCE7"),
+            "excellent": QColor("#CCFBF1"),
+        }
+        return colors.get(str(status_code or ""))
+
+    @staticmethod
+    def _status_label(status_code: str) -> str:
+        labels = {
+            "lagging": "落后",
+            "warning": "预警",
+            "ok": "达标",
+            "excellent": "超常",
+            "no_target": "未设置目标",
+        }
+        return labels.get(str(status_code or ""), str(status_code or ""))
+
+    def _target_period_type(self, mode: str, cross_cycle: bool) -> str:
+        if cross_cycle:
+            return ""
+        if mode == self.MODE_DAY:
+            return "day"
+        if mode == self.MODE_WEEK:
+            return "week"
+        if mode == self.MODE_MONTH:
+            return "cycle"
+        return ""
+
+    def _build_star_alert_map(self, rows: list[dict], start_date: str, end_date: str) -> dict[str, dict]:
+        if self.star_customer_alert_service is None:
+            return {}
+        team_ids = sorted({int(row.get("team_id", 0) or 0) for row in rows if int(row.get("team_id", 0) or 0) > 0})
+        if not team_ids:
+            return {}
+        summary = self.star_customer_alert_service.get_star_alert_summary_for_range(
+            start_date=start_date,
+            end_date=end_date,
+            team_ids=team_ids,
+        )
+        result: dict[str, dict] = {
+            f"{int(item.get('team_id', 0) or 0)}:{int(item.get('account_manager_id', 0) or 0)}": item
+            for item in summary.get("details", [])
+        }
+        for row in rows:
+            team_id = int(row.get("team_id", 0) or 0)
+            manager_id = int(row.get("account_manager_id", 0) or 0)
+            if team_id <= 0 or manager_id <= 0:
+                continue
+            row_key = f"{team_id}:{manager_id}"
+            if row_key not in result:
+                result[row_key] = self.star_customer_alert_service.get_star_alert_status_for_range(
+                    team_id=team_id,
+                    account_manager_id=manager_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+        return result
+
+    def _apply_alert_style(
+        self,
+        item: QTableWidgetItem,
+        field_key: str,
+        row: dict,
+        target_alerts: dict[str, dict[str, dict]],
+        star_alerts: dict[str, dict],
+    ) -> None:
+        team_id = int(row.get("team_id", 0) or 0)
+        manager_id = int(row.get("account_manager_id", 0) or 0)
+        row_key = f"{team_id}:{manager_id}"
+
+        status = target_alerts.get(row_key, {}).get(field_key)
+        if status:
+            status_code = str(status.get("status_code", ""))
+            color = self._status_color(status_code)
+            if color is not None:
+                item.setData(Qt.BackgroundRole, color)
+                item.setToolTip(
+                    f"目标进度：{self._status_label(status_code)}\n"
+                    f"完成率：{format_percent(status.get('completion_rate'))}\n"
+                    f"时间进度：{format_percent(status.get('time_progress'))}"
+                )
+                return
+
+        star_status = star_alerts.get(row_key, {})
+        if field_key == "four_star_customer_count" and star_status.get("four_star_alert"):
+            item.setData(Qt.BackgroundRole, QColor("#FFE4E6"))
+            item.setToolTip("四星客户数在查询区间内出现连续三工作日未达标，已触发预警")
+        elif field_key == "five_star_customer_count" and star_status.get("five_star_alert"):
+            item.setData(Qt.BackgroundRole, QColor("#FFE4E6"))
+            item.setToolTip("五星客户数在查询区间内出现连续三工作日未达标，已触发预警")
+
+    def _build_export_cell_style(
+        self,
+        field_key: str,
+        row: dict,
+        target_alerts: dict[str, dict[str, dict]],
+        star_alerts: dict[str, dict],
+    ) -> dict:
+        team_id = int(row.get("team_id", 0) or 0)
+        manager_id = int(row.get("account_manager_id", 0) or 0)
+        row_key = f"{team_id}:{manager_id}"
+
+        status = target_alerts.get(row_key, {}).get(field_key)
+        if status:
+            color = self._status_color(str(status.get("status_code", "")))
+            if color is not None:
+                return {"background": color.name()}
+
+        star_status = star_alerts.get(row_key, {})
+        if field_key == "four_star_customer_count" and star_status.get("four_star_alert"):
+            return {"background": "#FFE4E6"}
+        if field_key == "five_star_customer_count" and star_status.get("five_star_alert"):
+            return {"background": "#FFE4E6"}
+        return {}
+
     def on_query(self, *_args) -> None:
         selected_team_ids = self._checked_team_ids()
         if len(selected_team_ids) == 1:
@@ -373,27 +513,102 @@ class QueryTab(QWidget):
             return
 
         rows = result.get("rows", [])
+        cross_cycle = bool(result.get("cross_cycle"))
+        self._current_query_mode = mode
+        self._current_query_start = str(result.get("start_date", ""))
+        self._current_query_end = str(result.get("end_date", ""))
+        target_alerts = {}
+        if self.target_alert_service is not None:
+            period_type = self._target_period_type(mode, cross_cycle)
+            target_alerts = self.target_alert_service.get_query_alerts(
+                period_type=period_type,
+                start_date=str(result.get("start_date", "")),
+                end_date=str(result.get("end_date", "")),
+                rows=rows,
+            )
+        star_alerts = self._build_star_alert_map(
+            rows,
+            str(result.get("start_date", "")),
+            str(result.get("end_date", "")),
+        )
+        if self.target_alert_service is not None:
+            self._current_alert_summary = list(
+                self.target_alert_service.summarize_alerts(target_alerts, star_alerts).get("lines", [])
+            )
+        else:
+            self._current_alert_summary = []
+
         self.table.setRowCount(len(rows))
+        self._current_render_rows = []
+        self._current_cell_styles = []
         for row_idx, row in enumerate(rows):
             values = self._build_table_values(row)
+            self._current_render_rows.append(values)
+            row_styles: list[dict] = []
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
                 field_key = self.FIELD_KEYS[col_idx]
+                row_styles.append(self._build_export_cell_style(field_key, row, target_alerts, star_alerts))
                 if field_key in {"query_range", "account_manager_name"}:
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 else:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._apply_alert_style(item, field_key, row, target_alerts, star_alerts)
                 self.table.setItem(row_idx, col_idx, item)
+            self._current_cell_styles.append(row_styles)
 
         self.table.resizeColumnsToContents()
 
-        cross_cycle = bool(result.get("cross_cycle"))
         self.range_info.setText(f"查询范围：{result.get('start_date', '')} ~ {result.get('end_date', '')}")
         if not selected_team_ids:
             self.rule_info.setText("当前未勾选团队，结果为空")
         else:
             self.rule_info.setText("跨结算周期区间：目标完成进度已置空" if cross_cycle else "")
         self._apply_summary(result.get("summary", {}), cross_cycle)
+
+    def _resolve_image_output_dir(self) -> Path:
+        raw = ""
+        if self.settings_service is not None:
+            raw = str(self.settings_service.get("default_export_dir", "") or "").strip()
+        if raw:
+            return Path(raw) / "images"
+        return Path.cwd() / "exports" / "images"
+
+    def on_export_png_bundle(self) -> None:
+        if self.report_image_service is None:
+            QMessageBox.warning(self, "提示", "当前导出服务不可用")
+            return
+        if not self._current_render_rows:
+            QMessageBox.warning(self, "提示", "当前没有可导出的查询汇总数据")
+            return
+
+        try:
+            result = self.report_image_service.export_query_summary_bundle(
+                output_dir=self._resolve_image_output_dir(),
+                title="查询汇总总图",
+                mode=self._current_query_mode or self.mode_combo.currentText(),
+                start_date=self._current_query_start,
+                end_date=self._current_query_end,
+                headers=self.TABLE_HEADERS,
+                rows=self._current_render_rows,
+                cell_styles=self._current_cell_styles,
+                alert_summary=self._current_alert_summary,
+            )
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "导出失败", f"导出PNG总图失败：{exc}")
+            return
+
+        QMessageBox.information(
+            self,
+            "导出成功",
+            "\n".join(
+                [
+                    "已生成查询汇总PNG总图。",
+                    f"保存目录：{result.get('output_dir', '')}",
+                    f"总图文件：{Path(str(result.get('total_path', ''))).name}",
+                ]
+            ),
+        )
 
     def on_reset(self) -> None:
         self.mode_combo.setCurrentText(self.MODE_DAY)
@@ -402,6 +617,12 @@ class QueryTab(QWidget):
         self.custom_end.setDate(QDate.currentDate())
         self._set_all_team_checked(True)
         self.table.setRowCount(0)
+        self._current_render_rows = []
+        self._current_cell_styles = []
+        self._current_alert_summary = []
+        self._current_query_mode = ""
+        self._current_query_start = ""
+        self._current_query_end = ""
         self.range_info.setText("")
         self.rule_info.setText("")
         for label in self.summary_labels.values():
@@ -482,7 +703,7 @@ class QueryTab(QWidget):
             widget.setMinimumHeight(control_h)
 
         btn_h = self._scale(metrics.button_height, 26)
-        for btn in [self.week_prev_btn, self.week_next_btn, self.query_btn, self.reset_btn]:
+        for btn in [self.week_prev_btn, self.week_next_btn, self.query_btn, self.reset_btn, self.export_png_btn]:
             btn.setMinimumHeight(btn_h)
 
         self.team_list.setMaximumHeight(self._scale(metrics.team_list_max_height, 68))

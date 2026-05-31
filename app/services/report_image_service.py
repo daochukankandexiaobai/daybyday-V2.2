@@ -85,6 +85,8 @@ class ReportImageService:
         team_manager_name: str,
         headers: Sequence[str],
         rows: Sequence[Sequence[str]],
+        cell_styles: Sequence[Sequence[dict]] | None = None,
+        alert_summary: Sequence[str] | None = None,
     ) -> dict[str, str | list[str]]:
         """导出分图和总图，返回全部输出路径。"""
         out_dir = ensure_dir(str(output_dir))
@@ -94,12 +96,19 @@ class ReportImageService:
         part_paths: list[str] = []
         part_images: list[QImage] = []
         for spec in self.SECTION_SPECS:
-            section_headers, section_rows = self._slice_rows(headers, rows, spec.column_indexes)
+            section_headers, section_rows, section_styles = self._slice_rows(
+                headers,
+                rows,
+                spec.column_indexes,
+                cell_styles=cell_styles,
+            )
             image = self._render_table_image(
                 title=spec.title,
                 info_line=info_line,
+                alert_summary=alert_summary or [],
                 headers=section_headers,
                 rows=section_rows,
+                cell_styles=section_styles,
             )
             file_name = f"{prefix}_{spec.index:02d}_{spec.file_suffix}.png"
             file_path = out_dir / file_name
@@ -111,6 +120,7 @@ class ReportImageService:
         total_image = self._compose_total_image(
             title="今日展示汇总图",
             info_line=info_line,
+            alert_summary=alert_summary or [],
             part_images=part_images,
         )
         total_path = out_dir / f"{prefix}_总图.png"
@@ -129,17 +139,74 @@ class ReportImageService:
             "part_paths": part_paths,
         }
 
+    def export_query_summary_bundle(
+        self,
+        *,
+        output_dir: str | Path,
+        title: str,
+        mode: str,
+        start_date: str,
+        end_date: str,
+        headers: Sequence[str],
+        rows: Sequence[Sequence[str]],
+        cell_styles: Sequence[Sequence[dict]] | None = None,
+        alert_summary: Sequence[str] | None = None,
+    ) -> dict[str, str | list[str]]:
+        out_dir = ensure_dir(str(output_dir))
+        safe_start = sanitize_component(start_date or "未知开始")
+        safe_end = sanitize_component(end_date or "未知结束")
+        prefix = f"查询汇总_{sanitize_component(mode or '查询')}_{safe_start}_{safe_end}"
+        info_line = f"模式：{mode or '-'}  |  查询范围：{start_date or '-'} ~ {end_date or '-'}"
+
+        image = self._render_table_image(
+            title=title or "查询汇总",
+            info_line=info_line,
+            alert_summary=alert_summary or [],
+            headers=headers,
+            rows=rows,
+            cell_styles=cell_styles,
+        )
+        part_path = out_dir / f"{prefix}_01_汇总表.png"
+        if not image.save(str(part_path), "PNG"):
+            raise RuntimeError(f"查询汇总分图保存失败: {part_path}")
+
+        total_image = self._compose_total_image(
+            title=title or "查询汇总总图",
+            info_line=info_line,
+            alert_summary=alert_summary or [],
+            part_images=[image],
+        )
+        total_path = out_dir / f"{prefix}_总图.png"
+        if not total_image.save(str(total_path), "PNG"):
+            raise RuntimeError(f"查询汇总总图保存失败: {total_path}")
+
+        return {
+            "output_dir": str(out_dir),
+            "total_path": str(total_path),
+            "part_paths": [str(part_path)],
+        }
+
     @staticmethod
     def _slice_rows(
         headers: Sequence[str],
         rows: Sequence[Sequence[str]],
         column_indexes: tuple[int, ...],
-    ) -> tuple[list[str], list[list[str]]]:
+        cell_styles: Sequence[Sequence[dict]] | None = None,
+    ) -> tuple[list[str], list[list[str]], list[list[dict]] | None]:
         section_headers = [str(headers[idx]) if idx < len(headers) else "" for idx in column_indexes]
         section_rows: list[list[str]] = []
-        for row in rows:
+        section_styles: list[list[dict]] = []
+        for row_idx, row in enumerate(rows):
             section_rows.append([str(row[idx]) if idx < len(row) else "" for idx in column_indexes])
-        return section_headers, section_rows
+            if cell_styles is not None:
+                source_style_row = cell_styles[row_idx] if row_idx < len(cell_styles) else []
+                section_styles.append(
+                    [
+                        dict(source_style_row[idx]) if idx < len(source_style_row) and isinstance(source_style_row[idx], dict) else {}
+                        for idx in column_indexes
+                    ]
+                )
+        return section_headers, section_rows, section_styles if cell_styles is not None else None
 
     @staticmethod
     def _build_prefix(record_date: str, settlement_cycle_code: str) -> str:
@@ -206,12 +273,16 @@ class ReportImageService:
         *,
         title: str,
         info_line: str,
+        alert_summary: Sequence[str],
         headers: Sequence[str],
         rows: Sequence[Sequence[str]],
+        cell_styles: Sequence[Sequence[dict]] | None = None,
     ) -> QImage:
         margin = 20
         title_h = 38
         info_h = 26
+        alert_lines = [str(item) for item in (alert_summary or []) if str(item).strip()]
+        alert_h = 0 if not alert_lines else 30 * ((len(alert_lines) + 2) // 3)
         header_h = 36
         row_h = 32
 
@@ -228,7 +299,7 @@ class ReportImageService:
         table_height = header_h + len(rows) * row_h
 
         image_width = margin * 2 + table_width
-        image_height = margin * 2 + title_h + info_h + table_height
+        image_height = margin * 2 + title_h + info_h + alert_h + table_height
 
         image = QImage(image_width, image_height, QImage.Format_ARGB32)
         image.fill(QColor("#FFFFFF"))
@@ -253,7 +324,15 @@ class ReportImageService:
         painter.setFont(info_font)
         painter.drawText(QRect(title_x, margin + title_h, table_width - (title_x - margin), info_h), Qt.AlignLeft | Qt.AlignVCenter, info_line)
 
-        table_top = margin + title_h + info_h
+        if alert_lines:
+            painter.setFont(info_font)
+            for line_idx in range(0, len(alert_lines), 3):
+                text = "  |  ".join(alert_lines[line_idx:line_idx + 3])
+                y = margin + title_h + info_h + (line_idx // 3) * 30
+                painter.setPen(QColor("#7A111A"))
+                painter.drawText(QRect(title_x, y, table_width - (title_x - margin), 28), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+        table_top = margin + title_h + info_h + alert_h
 
         header_bg = QColor("#EFF6FF")
         grid_color = QColor("#CBD5E1")
@@ -290,6 +369,11 @@ class ReportImageService:
             for col, text in enumerate(row):
                 w = widths[col]
                 rect = QRect(x, row_top, w, row_h)
+                if not is_summary_row and cell_styles is not None:
+                    style = cell_styles[row_idx][col] if row_idx < len(cell_styles) and col < len(cell_styles[row_idx]) else {}
+                    bg = str(style.get("background", "")).strip()
+                    if bg:
+                        painter.fillRect(rect, QColor(bg))
                 if is_summary_row:
                     painter.setPen(QPen(QColor("#07285E"), 2))
                 else:
@@ -308,7 +392,14 @@ class ReportImageService:
         painter.end()
         return image
 
-    def _compose_total_image(self, *, title: str, info_line: str, part_images: Sequence[QImage]) -> QImage:
+    def _compose_total_image(
+        self,
+        *,
+        title: str,
+        info_line: str,
+        alert_summary: Sequence[str],
+        part_images: Sequence[QImage],
+    ) -> QImage:
         if not part_images:
             raise ValueError("没有可拼接的分图")
 
@@ -316,6 +407,8 @@ class ReportImageService:
         gap = 18
         title_h = 42
         info_h = 28
+        alert_lines = [str(item) for item in (alert_summary or []) if str(item).strip()]
+        alert_h = 0 if not alert_lines else 30 * ((len(alert_lines) + 2) // 3)
 
         title_font = QFont("Microsoft YaHei", 16)
         title_font.setBold(True)
@@ -332,11 +425,12 @@ class ReportImageService:
             max_width,
             title_fm.horizontalAdvance(title) + logo_offset + 20,
             info_fm.horizontalAdvance(info_line) + logo_offset + 20,
+            max([info_fm.horizontalAdvance("  |  ".join(alert_lines[idx:idx + 3])) + logo_offset + 20 for idx in range(0, len(alert_lines), 3)] or [0]),
         )
 
         content_height = sum(image.height() for image in part_images) + gap * (len(part_images) - 1)
         canvas_width = max_width + margin * 2
-        canvas_height = margin * 2 + title_h + info_h + content_height
+        canvas_height = margin * 2 + title_h + info_h + alert_h + content_height
 
         canvas = QImage(canvas_width, canvas_height, QImage.Format_ARGB32)
         canvas.fill(QColor("#FFFFFF"))
@@ -358,7 +452,14 @@ class ReportImageService:
         painter.setFont(info_font)
         painter.drawText(QRect(title_x, margin + title_h, max_width - (title_x - margin), info_h), Qt.AlignLeft | Qt.AlignVCenter, info_line)
 
-        y = margin + title_h + info_h
+        if alert_lines:
+            painter.setPen(QColor("#7A111A"))
+            for line_idx in range(0, len(alert_lines), 3):
+                text = "  |  ".join(alert_lines[line_idx:line_idx + 3])
+                y_line = margin + title_h + info_h + (line_idx // 3) * 30
+                painter.drawText(QRect(title_x, y_line, max_width - (title_x - margin), 28), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+        y = margin + title_h + info_h + alert_h
         for idx, image in enumerate(part_images):
             x = margin + (max_width - image.width()) // 2
             painter.drawImage(x, y, image)

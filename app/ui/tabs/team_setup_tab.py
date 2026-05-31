@@ -1,7 +1,8 @@
 ﻿from __future__ import annotations
 
 from app.ui.layout_profile import LayoutProfile
-from app.utils.qt_compat import QDate, Qt, Signal
+from app.ui.weekly_target_dialog import WeeklyTargetDialog
+from app.utils.qt_compat import QDate, Qt, Signal, dialog_exec
 from app.utils.qt_compat import (
     QDateEdit,
     QFrame,
@@ -35,12 +36,14 @@ class TeamSetupTab(QWidget):
     def __init__(
         self,
         team_service,
+        weekly_target_service=None,
         admin_team_service=None,
         operator_getter=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.team_service = team_service
+        self.weekly_target_service = weekly_target_service
         self.admin_team_service = admin_team_service
         self.operator_getter = operator_getter or (lambda: "admin")
         self.current_team_id: int | None = None
@@ -79,6 +82,7 @@ class TeamSetupTab(QWidget):
 
         self.add_member_btn.clicked.connect(self.on_add_member)
         self.remove_member_btn.clicked.connect(self.on_remove_member)
+        self.batch_member_btn.clicked.connect(self.on_open_weekly_targets)
         self.save_btn.clicked.connect(self.on_save)
         self.reset_btn.clicked.connect(self.on_reset)
         self.cycle_base_date.dateChanged.connect(self.refresh_cycle_related)
@@ -242,9 +246,13 @@ class TeamSetupTab(QWidget):
         self.add_member_btn.setProperty("buttonRole", "secondary")
         self.remove_member_btn = QPushButton("删除客户经理")
         self.remove_member_btn.setProperty("buttonRole", "danger")
-        self.batch_member_btn = QPushButton("批量粘贴（预留）")
+        self.batch_member_btn = QPushButton("周期目标设置")
         self.batch_member_btn.setProperty("buttonRole", "secondary")
-        self.batch_member_btn.setEnabled(False)
+        self.batch_member_btn.setToolTip("为当前团队设置本结算周期内各周目标。")
+
+        self.target_hint_label = QLabel("结算周期目标由本周期各周“目标回款”自动汇总")
+        self.target_hint_label.setObjectName("targetHint")
+        self.target_hint_label.setStyleSheet("color: #6C7A89;")
 
         toolbar_layout.addWidget(self.add_member_btn)
         toolbar_layout.addWidget(self.remove_member_btn)
@@ -272,6 +280,7 @@ class TeamSetupTab(QWidget):
         action_layout.addWidget(self.save_btn)
 
         member_layout.addWidget(self.member_toolbar)
+        member_layout.addWidget(self.target_hint_label)
         member_layout.addWidget(self.member_table, 1)
         member_layout.addWidget(self.detail_action_row)
 
@@ -318,6 +327,7 @@ class TeamSetupTab(QWidget):
         self._is_new_team_mode = is_new
         self.mode_label.setText("新建模式" if is_new else "编辑模式")
         self._refresh_delete_button_state()
+        self._refresh_weekly_target_button_state()
 
     def _clear_editor(self) -> None:
         self.region_edit.clear()
@@ -331,6 +341,7 @@ class TeamSetupTab(QWidget):
         self.cycle_code_label.setText(self._cycle_code())
         self._apply_member_table_columns()
         self._refresh_remove_member_button_state()
+        self._refresh_weekly_target_button_state()
 
     def _set_editor_enabled(self, enabled: bool) -> None:
         self.region_edit.setEnabled(enabled)
@@ -341,7 +352,7 @@ class TeamSetupTab(QWidget):
         self.add_member_btn.setEnabled(enabled)
         self.save_btn.setEnabled(enabled)
         self.reset_btn.setEnabled(enabled)
-        self.batch_member_btn.setEnabled(False)
+        self._refresh_weekly_target_button_state()
         self._refresh_delete_button_state()
         self._refresh_remove_member_button_state()
 
@@ -357,6 +368,15 @@ class TeamSetupTab(QWidget):
     def _refresh_remove_member_button_state(self) -> None:
         enabled = self.member_table.isEnabled() and self.member_table.currentRow() >= 0
         self.remove_member_btn.setEnabled(enabled)
+
+    def _refresh_weekly_target_button_state(self) -> None:
+        enabled = bool(
+            self.weekly_target_service is not None
+            and self.member_table.isEnabled()
+            and self.current_team_id
+            and not self._is_new_team_mode
+        )
+        self.batch_member_btn.setEnabled(enabled)
 
     def _selected_team_id_from_list(self) -> int:
         item = self.team_list.currentItem()
@@ -530,6 +550,28 @@ class TeamSetupTab(QWidget):
         self.team_manager_edit.setText(str(team.get("team_manager_name", "")))
         self.refresh_cycle_related()
         self._refresh_delete_button_state()
+        self._refresh_weekly_target_button_state()
+
+    def on_open_weekly_targets(self) -> None:
+        if self.weekly_target_service is None:
+            QMessageBox.warning(self, "提示", "当前未配置周期目标设置服务")
+            return
+
+        team_id = int(self.current_team_id or 0)
+        if team_id <= 0:
+            QMessageBox.warning(self, "提示", "请先选择并保存团队")
+            return
+
+        dialog = WeeklyTargetDialog(
+            weekly_target_service=self.weekly_target_service,
+            team_id=team_id,
+            settlement_cycle_code=self._cycle_code(),
+            parent=self,
+        )
+        dialog.targets_saved.connect(self.refresh_cycle_related)
+        dialog_exec(dialog)
+        if dialog.was_saved:
+            self.refresh_cycle_related()
 
     def _operator(self) -> str:
         try:
@@ -621,15 +663,41 @@ class TeamSetupTab(QWidget):
     def on_member_table_item_changed(self, _item: QTableWidgetItem) -> None:
         self._refresh_member_stats_from_table()
 
+    def _target_display_item(self, target: float) -> QTableWidgetItem:
+        target_item = QTableWidgetItem(f"{float(target or 0):.2f}")
+        target_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        target_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
+        target_item.setToolTip("由周期目标设置中的各周目标回款自动汇总")
+        return target_item
+
+    def _list_members_with_auto_targets(self, cycle_code: str) -> list[dict]:
+        if self.weekly_target_service is None:
+            return self.team_service.list_members_with_targets(self.current_team_id, cycle_code)
+
+        target_rows = self.weekly_target_service.get_account_manager_cycle_targets(
+            team_id=int(self.current_team_id or 0),
+            settlement_cycle_code=cycle_code,
+        )
+        return [
+            {
+                "account_manager_id": int(row.get("account_manager_id", 0) or 0),
+                "account_manager_name": str(row.get("account_manager_name", "")),
+                "target_amount": float(row.get("repayment_target", 0) or 0),
+                "is_active": 1,
+            }
+            for row in target_rows
+        ]
+
     def refresh_cycle_related(self, *_args) -> None:
         cycle_code = self._cycle_code()
         self.cycle_code_label.setText(cycle_code)
 
         if not self.current_team_id:
             self._refresh_member_stats_from_table()
+            self._refresh_weekly_target_button_state()
             return
 
-        rows = self.team_service.list_members_with_targets(self.current_team_id, cycle_code)
+        rows = self._list_members_with_auto_targets(cycle_code)
         self.member_table.blockSignals(True)
         self.member_table.setRowCount(len(rows))
         total_target = 0.0
@@ -637,24 +705,21 @@ class TeamSetupTab(QWidget):
             self.member_table.setItem(i, 0, QTableWidgetItem(str(row.get("account_manager_name", ""))))
             target = float(row.get("target_amount", 0) or 0)
             total_target += target
-            target_item = QTableWidgetItem(f"{target:.2f}")
-            target_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            self.member_table.setItem(i, 1, target_item)
+            self.member_table.setItem(i, 1, self._target_display_item(target))
         self.member_table.blockSignals(False)
 
         self.total_members_label.setText(str(len(rows)))
         self.team_target_label.setText(f"{total_target:.2f}")
         self._apply_member_table_columns()
         self._refresh_remove_member_button_state()
+        self._refresh_weekly_target_button_state()
 
     def on_add_member(self) -> None:
         row = self.member_table.rowCount()
         self.member_table.blockSignals(True)
         self.member_table.insertRow(row)
         self.member_table.setItem(row, 0, QTableWidgetItem(""))
-        target_item = QTableWidgetItem("0")
-        target_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.member_table.setItem(row, 1, target_item)
+        self.member_table.setItem(row, 1, self._target_display_item(0.0))
         self.member_table.blockSignals(False)
         self.member_table.setCurrentCell(row, 0)
         self._refresh_member_stats_from_table()
@@ -676,9 +741,7 @@ class TeamSetupTab(QWidget):
         seen_names: set[str] = set()
         for row in range(self.member_table.rowCount()):
             name_item = self.member_table.item(row, 0)
-            target_item = self.member_table.item(row, 1)
             name = (name_item.text() if name_item else "").strip()
-            target = (target_item.text() if target_item else "0").strip()
             if not name:
                 continue
             key = name.casefold()
@@ -686,10 +749,7 @@ class TeamSetupTab(QWidget):
                 raise ValueError(f"第{row + 1}行客户经理姓名重复：{name}")
             seen_names.add(key)
 
-            ok, value, err = validate_non_negative_decimal_input(target)
-            if not ok:
-                raise ValueError(f"第{row + 1}行目标值无效：{err}")
-            members.append({"account_manager_name": name, "target_amount": value})
+            members.append({"account_manager_name": name})
         return members
 
     def on_save(self) -> None:
@@ -710,6 +770,7 @@ class TeamSetupTab(QWidget):
             team_manager_name=self.team_manager_edit.text().strip(),
             settlement_cycle_code=self._cycle_code(),
             members=members,
+            sync_cycle_targets=False,
         )
         if not ok:
             QMessageBox.warning(self, "保存失败", message)
@@ -759,6 +820,7 @@ class TeamSetupTab(QWidget):
             self.add_member_btn,
             self.remove_member_btn,
             self.batch_member_btn,
+            self.target_hint_label,
             self.save_btn,
             self.reset_btn,
         ]:

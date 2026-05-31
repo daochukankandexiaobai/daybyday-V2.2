@@ -9,7 +9,7 @@ from app.utils.log_utils import get_logger
 
 DEFAULT_TEMPLATE_NAME = "V1.0日报模板"
 DEFAULT_TEMPLATE_VERSION = "2026.04.01"
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 BUSINESS_RULES_VERSION = "1.1"
 
 LOGGER = get_logger("migrations")
@@ -284,6 +284,44 @@ def run_migrations(db_manager) -> None:
 
         cursor.execute(
             """
+            CREATE TABLE IF NOT EXISTS weekly_targets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                settlement_cycle_code TEXT NOT NULL,
+                week_index INTEGER NOT NULL,
+                week_start_date TEXT NOT NULL,
+                week_end_date TEXT NOT NULL,
+                team_id INTEGER NOT NULL,
+                account_manager_id INTEGER NOT NULL,
+                visit_target INTEGER DEFAULT 0,
+                quality_visit_target INTEGER DEFAULT 0,
+                repayment_target REAL DEFAULT 0,
+                version INTEGER DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(settlement_cycle_code, week_index, team_id, account_manager_id),
+                FOREIGN KEY(team_id) REFERENCES teams(id),
+                FOREIGN KEY(account_manager_id) REFERENCES account_managers(id)
+            );
+            """
+        )
+        for column_name, ddl in [
+            ("settlement_cycle_code", "TEXT NOT NULL DEFAULT ''"),
+            ("week_index", "INTEGER NOT NULL DEFAULT 0"),
+            ("week_start_date", "TEXT NOT NULL DEFAULT ''"),
+            ("week_end_date", "TEXT NOT NULL DEFAULT ''"),
+            ("team_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("account_manager_id", "INTEGER NOT NULL DEFAULT 0"),
+            ("visit_target", "INTEGER DEFAULT 0"),
+            ("quality_visit_target", "INTEGER DEFAULT 0"),
+            ("repayment_target", "REAL DEFAULT 0"),
+            ("version", "INTEGER DEFAULT 1"),
+            ("created_at", "TEXT NOT NULL DEFAULT ''"),
+            ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ]:
+            _ensure_column(conn, "weekly_targets", column_name, ddl)
+
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS daily_records (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 record_id TEXT UNIQUE NOT NULL,
@@ -376,6 +414,18 @@ def run_migrations(db_manager) -> None:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_cycle_targets_cycle ON cycle_targets(team_id, settlement_cycle_code);"
+        )
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_targets_unique_v1 "
+            "ON weekly_targets(settlement_cycle_code, week_index, team_id, account_manager_id);"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_weekly_targets_team_cycle "
+            "ON weekly_targets(team_id, settlement_cycle_code);"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_weekly_targets_manager_cycle "
+            "ON weekly_targets(account_manager_id, settlement_cycle_code);"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_teams_active ON teams(is_active, updated_at DESC, id DESC);"

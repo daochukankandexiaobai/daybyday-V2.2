@@ -599,6 +599,216 @@ class CycleTargetRepository(BaseRepository):
             return float(row["target_sum"] or 0.0)
 
 
+class WeeklyTargetRepository(BaseRepository):
+    def list_targets_for_team_cycle(self, team_id: int, settlement_cycle_code: str) -> list[dict[str, Any]]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    wt.*,
+                    am.account_manager_name
+                FROM weekly_targets wt
+                LEFT JOIN account_managers am ON am.id = wt.account_manager_id
+                WHERE wt.team_id = ? AND wt.settlement_cycle_code = ?
+                ORDER BY wt.week_index ASC, am.account_manager_name ASC, wt.account_manager_id ASC
+                """,
+                (team_id, settlement_cycle_code),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_targets_for_manager_cycle(
+        self,
+        team_id: int,
+        account_manager_id: int,
+        settlement_cycle_code: str,
+    ) -> list[dict[str, Any]]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM weekly_targets
+                WHERE team_id = ?
+                  AND account_manager_id = ?
+                  AND settlement_cycle_code = ?
+                ORDER BY week_index ASC
+                """,
+                (team_id, account_manager_id, settlement_cycle_code),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_targets_for_team_week(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        week_index: int,
+    ) -> list[dict[str, Any]]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    wt.*,
+                    am.account_manager_name
+                FROM weekly_targets wt
+                LEFT JOIN account_managers am ON am.id = wt.account_manager_id
+                WHERE wt.team_id = ?
+                  AND wt.settlement_cycle_code = ?
+                  AND wt.week_index = ?
+                ORDER BY am.account_manager_name ASC, wt.account_manager_id ASC
+                """,
+                (team_id, settlement_cycle_code, week_index),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def replace_targets_for_team_week(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        week_index: int,
+        rows: list[dict[str, Any]],
+        now: str,
+    ) -> int:
+        with self.db.get_connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM weekly_targets
+                WHERE team_id = ?
+                  AND settlement_cycle_code = ?
+                  AND week_index = ?
+                """,
+                (team_id, settlement_cycle_code, week_index),
+            )
+            saved_count = 0
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO weekly_targets
+                    (
+                        settlement_cycle_code,
+                        week_index,
+                        week_start_date,
+                        week_end_date,
+                        team_id,
+                        account_manager_id,
+                        visit_target,
+                        quality_visit_target,
+                        repayment_target,
+                        version,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        settlement_cycle_code,
+                        int(row.get("week_index", 0) or 0),
+                        str(row.get("week_start_date", "")).strip(),
+                        str(row.get("week_end_date", "")).strip(),
+                        team_id,
+                        int(row.get("account_manager_id", 0) or 0),
+                        int(row.get("visit_target", 0) or 0),
+                        int(row.get("quality_visit_target", 0) or 0),
+                        float(row.get("repayment_target", 0) or 0.0),
+                        int(row.get("version", 1) or 1),
+                        now,
+                        now,
+                    ),
+                )
+                saved_count += 1
+            conn.commit()
+            return saved_count
+
+    def replace_targets_for_team_cycle(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        rows: list[dict[str, Any]],
+        now: str,
+    ) -> int:
+        with self.db.get_connection() as conn:
+            conn.execute(
+                """
+                DELETE FROM weekly_targets
+                WHERE team_id = ? AND settlement_cycle_code = ?
+                """,
+                (team_id, settlement_cycle_code),
+            )
+            saved_count = 0
+            for row in rows:
+                conn.execute(
+                    """
+                    INSERT INTO weekly_targets
+                    (
+                        settlement_cycle_code,
+                        week_index,
+                        week_start_date,
+                        week_end_date,
+                        team_id,
+                        account_manager_id,
+                        visit_target,
+                        quality_visit_target,
+                        repayment_target,
+                        version,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        settlement_cycle_code,
+                        int(row.get("week_index", 0) or 0),
+                        str(row.get("week_start_date", "")).strip(),
+                        str(row.get("week_end_date", "")).strip(),
+                        team_id,
+                        int(row.get("account_manager_id", 0) or 0),
+                        int(row.get("visit_target", 0) or 0),
+                        int(row.get("quality_visit_target", 0) or 0),
+                        float(row.get("repayment_target", 0) or 0.0),
+                        int(row.get("version", 1) or 1),
+                        now,
+                        now,
+                    ),
+                )
+                saved_count += 1
+            conn.commit()
+            return saved_count
+
+    def sum_targets_by_manager(self, team_id: int, settlement_cycle_code: str) -> dict[int, dict[str, Any]]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    account_manager_id,
+                    COALESCE(SUM(visit_target), 0) AS visit_target,
+                    COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
+                    COALESCE(SUM(repayment_target), 0) AS repayment_target
+                FROM weekly_targets
+                WHERE team_id = ? AND settlement_cycle_code = ?
+                GROUP BY account_manager_id
+                """,
+                (team_id, settlement_cycle_code),
+            ).fetchall()
+            return {int(row["account_manager_id"]): dict(row) for row in rows}
+
+    def sum_targets_for_team(self, team_id: int, settlement_cycle_code: str) -> dict[str, Any]:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(visit_target), 0) AS visit_target,
+                    COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
+                    COALESCE(SUM(repayment_target), 0) AS repayment_target
+                FROM weekly_targets
+                WHERE team_id = ? AND settlement_cycle_code = ?
+                """,
+                (team_id, settlement_cycle_code),
+            ).fetchone()
+            return dict(row) if row is not None else {
+                "visit_target": 0,
+                "quality_visit_target": 0,
+                "repayment_target": 0.0,
+            }
+
+
 class DailyRecordRepository(BaseRepository):
     @staticmethod
     def _build_business_key(record: dict[str, Any]) -> str:
@@ -715,6 +925,64 @@ class DailyRecordRepository(BaseRepository):
                 (team_id, record_date),
             ).fetchall()
             return [dict(row) for row in rows]
+
+    def list_manager_records_by_dates(
+        self,
+        team_id: int,
+        account_manager_id: int,
+        dates: list[str],
+    ) -> list[dict[str, Any]]:
+        normalized_dates = [str(item or "").strip() for item in dates if str(item or "").strip()]
+        if not normalized_dates:
+            return []
+        placeholders = ",".join(["?" for _ in normalized_dates])
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM daily_records
+                WHERE team_id = ?
+                  AND account_manager_id = ?
+                  AND record_date IN ({placeholders})
+                ORDER BY record_date ASC, id ASC
+                """,
+                [team_id, account_manager_id, *normalized_dates],
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_team_manager_ids_with_records(
+        self,
+        team_id: int,
+        start_date: str,
+        end_date: str,
+    ) -> list[int]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT account_manager_id
+                FROM daily_records
+                WHERE team_id = ?
+                  AND record_date BETWEEN ? AND ?
+                  AND account_manager_id > 0
+                ORDER BY account_manager_id ASC
+                """,
+                (team_id, start_date, end_date),
+            ).fetchall()
+            return [int(row["account_manager_id"]) for row in rows]
+
+    def list_team_ids_with_records(self, start_date: str, end_date: str) -> list[int]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT team_id
+                FROM daily_records
+                WHERE record_date BETWEEN ? AND ?
+                  AND team_id > 0
+                ORDER BY team_id ASC
+                """,
+                (start_date, end_date),
+            ).fetchall()
+            return [int(row["team_id"]) for row in rows]
 
     def list_records(
         self,

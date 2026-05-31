@@ -403,6 +403,7 @@ class MainWindow(QMainWindow):
     def _build_tabs(self) -> None:
         self.team_setup_tab = TeamSetupTab(
             self.services["team_service"],
+            weekly_target_service=self.services.get("weekly_target_service"),
             admin_team_service=self.services["admin_team_service"],
             operator_getter=self.get_admin_operator,
         )
@@ -412,11 +413,17 @@ class MainWindow(QMainWindow):
             self.services["team_service"],
             self.services["settings_service"],
             self.services["report_image_service"],
+            target_alert_service=self.services.get("target_alert_service"),
+            star_customer_alert_service=self.services.get("star_customer_alert_service"),
         )
         self.query_tab = QueryTab(
             self.services["record_service"],
             self.services["team_service"],
             self.services["analytics_service"],
+            target_alert_service=self.services.get("target_alert_service"),
+            star_customer_alert_service=self.services.get("star_customer_alert_service"),
+            settings_service=self.services.get("settings_service"),
+            report_image_service=self.services.get("report_image_service"),
         )
         self.analysis_tab = AnalysisTab(
             self.services["record_service"],

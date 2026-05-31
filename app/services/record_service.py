@@ -419,6 +419,8 @@ class RecordService:
 
             result.append(
                 {
+                    "team_id": int(team_id),
+                    "account_manager_id": manager_id,
                     "record_date": record_date,
                     "account_manager_name": manager_name,
                     "settlement_cycle_code": settlement_cycle_display_code(record_date=record_date),
@@ -578,6 +580,7 @@ class RecordService:
                 "query_range": query_range,
                 "team_id": manager_team_id,
                 "team_name": manager_team_name,
+                "account_manager_id": manager_id,
                 "account_manager_name": display_name,
                 "settlement_cycle_code": "" if cross_cycle else settlement_cycle_display_code(cycle_code=cycle_code),
                 "cycle_target": cycle_target,

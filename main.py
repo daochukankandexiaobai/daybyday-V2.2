@@ -16,6 +16,7 @@ from app.db.repositories import (
     SettingsRepository,
     TeamRepository,
     TemplateRepository,
+    WeeklyTargetRepository,
 )
 from app.services.auth_service import AuthService
 from app.services.admin_action_log_service import AdminActionLogService
@@ -32,8 +33,12 @@ from app.services.settings_service import SettingsService
 from app.services.summary_service import SummaryService
 from app.services.team_service import TeamService
 from app.services.template_service import TemplateService
+from app.services.star_customer_alert_service import StarCustomerAlertService
+from app.services.target_alert_service import TargetAlertService
+from app.services.target_progress_service import TargetProgressService
 from app.services.ui_scale_manager import UIScaleManager
 from app.services.view_scale_service import ViewScaleService
+from app.services.weekly_target_service import WeeklyTargetService
 from app.ui.main_window import MainWindow
 from app.utils.error_utils import install_global_exception_handler
 from app.utils.log_utils import configure_app_logging, get_logger
@@ -50,6 +55,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
     team_repo = TeamRepository(db_manager)
     account_manager_repo = AccountManagerRepository(db_manager)
     cycle_target_repo = CycleTargetRepository(db_manager)
+    weekly_target_repo = WeeklyTargetRepository(db_manager)
     record_repo = DailyRecordRepository(db_manager)
 
     settings_service = SettingsService(settings_repo)
@@ -64,6 +70,23 @@ def build_services(db_manager: DatabaseManager) -> dict:
         template_service=template_service,
     )
     analytics_service = AnalyticsService(record_service=record_service)
+    weekly_target_service = WeeklyTargetService(
+        weekly_target_repo=weekly_target_repo,
+        cycle_target_repo=cycle_target_repo,
+        team_repo=team_repo,
+        account_manager_repo=account_manager_repo,
+    )
+    target_progress_service = TargetProgressService()
+    star_customer_alert_service = StarCustomerAlertService(
+        record_repo=record_repo,
+        account_manager_repo=account_manager_repo,
+        team_repo=team_repo,
+    )
+    target_alert_service = TargetAlertService(
+        record_repo=record_repo,
+        weekly_target_service=weekly_target_service,
+        target_progress_service=target_progress_service,
+    )
     admin_action_log_service = AdminActionLogService(admin_action_log_repo)
     admin_team_service = AdminTeamService(
         team_service=team_service,
@@ -86,8 +109,19 @@ def build_services(db_manager: DatabaseManager) -> dict:
         "team_service": team_service,
         "record_service": record_service,
         "analytics_service": analytics_service,
+        "weekly_target_service": weekly_target_service,
+        "target_progress_service": target_progress_service,
+        "target_alert_service": target_alert_service,
+        "star_customer_alert_service": star_customer_alert_service,
         "auth_service": AuthService(admin_repo),
-        "export_service": ExportService(record_service, team_service, settings_service, template_service),
+        "export_service": ExportService(
+            record_service,
+            team_service,
+            settings_service,
+            template_service,
+            target_alert_service=target_alert_service,
+            star_customer_alert_service=star_customer_alert_service,
+        ),
         "import_service": ImportService(
             record_repo=record_repo,
             import_log_repo=import_log_repo,
@@ -103,7 +137,13 @@ def build_services(db_manager: DatabaseManager) -> dict:
             template_service=template_service,
             record_service=record_service,
         ),
-        "summary_service": SummaryService(record_repo, import_log_repo, cycle_target_repo),
+        "summary_service": SummaryService(
+            record_repo,
+            import_log_repo,
+            cycle_target_repo,
+            target_alert_service=target_alert_service,
+            star_customer_alert_service=star_customer_alert_service,
+        ),
         "excel_service": ExcelService(),
         "report_image_service": ReportImageService(),
         "ui_scale_manager": UIScaleManager(view_scale_service),

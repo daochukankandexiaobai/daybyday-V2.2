@@ -50,6 +50,7 @@ class ExcelService:
                 dataset.get("by_team", []),
             )
             self._write_targets_sheet(wb, company_name, start_date, end_date, dataset.get("cycle_targets", []))
+            self._write_alert_sheet(wb, company_name, start_date, end_date, dataset.get("alert_rows", []))
             self._write_logs_sheet(wb, company_name, start_date, end_date, dataset.get("import_logs", []))
 
             target = Path(file_path)
@@ -194,6 +195,69 @@ class ExcelService:
             int_cols={1, 2},
             pct_cols=set(),
         )
+
+    def _write_alert_sheet(self, wb: Workbook, company_name: str, start_date: str, end_date: str, rows: list[dict]) -> None:
+        headers = [
+            "团队ID",
+            "团队",
+            "客户经理ID",
+            "客户经理",
+            "上门目标",
+            "上门完成率",
+            "上门状态",
+            "优质上门目标",
+            "优质上门完成率",
+            "优质上门状态",
+            "回款目标",
+            "回款完成率",
+            "回款状态",
+            "四星客户数预警状态",
+            "五星客户数预警状态",
+        ]
+        data = []
+        for row in rows:
+            data.append(
+                [
+                    int(row.get("team_id", 0) or 0),
+                    row.get("team_name", ""),
+                    int(row.get("account_manager_id", 0) or 0),
+                    row.get("account_manager_name", ""),
+                    self._int_or_none(row.get("visit_target")),
+                    row.get("visit_completion_rate"),
+                    row.get("visit_status", ""),
+                    self._int_or_none(row.get("quality_visit_target")),
+                    row.get("quality_visit_completion_rate"),
+                    row.get("quality_visit_status", ""),
+                    self._float_or_none(row.get("repayment_target")),
+                    row.get("repayment_completion_rate"),
+                    row.get("repayment_status", ""),
+                    "连续三工作日未达标预警" if row.get("four_star_low_streak_alert") else "",
+                    "连续三工作日未达标预警" if row.get("five_star_low_streak_alert") else "",
+                ]
+            )
+
+        ws = wb.create_sheet("预警明细")
+        self._write_table(
+            ws,
+            title=self._title(company_name, start_date, end_date),
+            headers=headers,
+            rows=data,
+            amount_cols={11},
+            int_cols={1, 3, 5, 8},
+            pct_cols={6, 9, 12},
+        )
+
+    @staticmethod
+    def _int_or_none(value):
+        if value is None:
+            return None
+        return int(float(value or 0))
+
+    @staticmethod
+    def _float_or_none(value):
+        if value is None:
+            return None
+        return float(value or 0)
 
     def _write_logs_sheet(self, wb: Workbook, company_name: str, start_date: str, end_date: str, rows: list[dict]) -> None:
         headers = [

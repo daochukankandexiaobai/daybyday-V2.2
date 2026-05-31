@@ -37,6 +37,8 @@ class PreviewTab(QWidget):
         team_service,
         settings_service,
         report_image_service,
+        target_alert_service=None,
+        star_customer_alert_service=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -44,11 +46,15 @@ class PreviewTab(QWidget):
         self.team_service = team_service
         self.settings_service = settings_service
         self.report_image_service = report_image_service
+        self.target_alert_service = target_alert_service
+        self.star_customer_alert_service = star_customer_alert_service
 
         self.logger = get_logger("preview_tab")
 
         self._current_cycle_code = ""
         self._current_render_rows: list[list[str]] = []
+        self._current_cell_styles: list[list[dict]] = []
+        self._current_alert_summary: list[str] = []
 
         self._build_ui()
         self.reload_teams()
@@ -251,12 +257,114 @@ class PreviewTab(QWidget):
             item.setData(Qt.ForegroundRole, fg)
             item.setFlags(item.flags() & ~Qt.ItemIsEditable)
 
+    @staticmethod
+    def _status_color(status_code: str) -> QColor | None:
+        colors = {
+            "lagging": QColor("#FDE2E2"),
+            "warning": QColor("#FFF4CC"),
+            "ok": QColor("#DCFCE7"),
+            "excellent": QColor("#CCFBF1"),
+        }
+        return colors.get(str(status_code or ""))
+
+    @staticmethod
+    def _status_label(status_code: str) -> str:
+        labels = {
+            "lagging": "落后",
+            "warning": "预警",
+            "ok": "达标",
+            "excellent": "超常",
+            "no_target": "未设置目标",
+        }
+        return labels.get(str(status_code or ""), str(status_code or ""))
+
+    def _build_star_alert_map(self, team_id: int, rows: list[dict], record_date: str) -> dict[str, dict]:
+        if self.star_customer_alert_service is None:
+            return {}
+        result: dict[str, dict] = {}
+        for row in rows:
+            manager_id = int(row.get("account_manager_id", 0) or 0)
+            if manager_id <= 0:
+                continue
+            status = self.star_customer_alert_service.get_star_alert_status_for_date(
+                team_id=team_id,
+                account_manager_id=manager_id,
+                record_date=record_date,
+            )
+            result[f"{team_id}:{manager_id}"] = status
+        return result
+
+    def _apply_alert_style(
+        self,
+        item: QTableWidgetItem,
+        field_key: str,
+        row: dict,
+        target_alerts: dict[str, dict[str, dict]],
+        star_alerts: dict[str, dict],
+    ) -> None:
+        if row.get("is_summary_row"):
+            return
+
+        team_id = int(row.get("team_id", self._current_team_id()) or 0)
+        manager_id = int(row.get("account_manager_id", 0) or 0)
+        row_key = f"{team_id}:{manager_id}"
+
+        status = target_alerts.get(row_key, {}).get(field_key)
+        if status:
+            status_code = str(status.get("status_code", ""))
+            color = self._status_color(status_code)
+            if color is not None:
+                item.setData(Qt.BackgroundRole, color)
+                item.setToolTip(
+                    f"目标进度：{self._status_label(status_code)}\n"
+                    f"完成率：{format_percent(status.get('completion_rate'))}\n"
+                    f"时间进度：{format_percent(status.get('time_progress'))}"
+                )
+                return
+
+        star_status = star_alerts.get(row_key, {})
+        if field_key == "four_star_customer_count_daily" and star_status.get("four_star_alert"):
+            item.setData(Qt.BackgroundRole, QColor("#FFE4E6"))
+            item.setToolTip("四星客户数连续三工作日未达标，已触发预警")
+        elif field_key == "five_star_customer_count_daily" and star_status.get("five_star_alert"):
+            item.setData(Qt.BackgroundRole, QColor("#FFE4E6"))
+            item.setToolTip("五星客户数连续三工作日未达标，已触发预警")
+
+    def _build_export_cell_style(
+        self,
+        field_key: str,
+        row: dict,
+        target_alerts: dict[str, dict[str, dict]],
+        star_alerts: dict[str, dict],
+    ) -> dict:
+        if row.get("is_summary_row"):
+            return {}
+
+        team_id = int(row.get("team_id", self._current_team_id()) or 0)
+        manager_id = int(row.get("account_manager_id", 0) or 0)
+        row_key = f"{team_id}:{manager_id}"
+
+        status = target_alerts.get(row_key, {}).get(field_key)
+        if status:
+            color = self._status_color(str(status.get("status_code", "")))
+            if color is not None:
+                return {"background": color.name()}
+
+        star_status = star_alerts.get(row_key, {})
+        if field_key == "four_star_customer_count_daily" and star_status.get("four_star_alert"):
+            return {"background": "#FFE4E6"}
+        if field_key == "five_star_customer_count_daily" and star_status.get("five_star_alert"):
+            return {"background": "#FFE4E6"}
+        return {}
+
     def refresh(self) -> None:
         team_id = self._current_team_id()
         if team_id <= 0:
             self.table.setRowCount(0)
             self._current_cycle_code = ""
             self._current_render_rows = []
+            self._current_cell_styles = []
+            self._current_alert_summary = []
             self.cycle_label.setText("结算周期：")
             return
 
@@ -265,9 +373,21 @@ class PreviewTab(QWidget):
         rows = self.record_service.get_preview_rows(team_id, record_date)
         render_rows = list(rows)
         render_rows.append(self._build_summary_row(rows, record_date))
+        manager_ids = sorted({int(row.get("account_manager_id", 0) or 0) for row in rows if int(row.get("account_manager_id", 0) or 0) > 0})
+        target_alerts = {}
+        if self.target_alert_service is not None:
+            target_alerts = self.target_alert_service.get_daily_alerts(team_id, record_date, manager_ids)
+        star_alerts = self._build_star_alert_map(team_id, rows, record_date)
+        if self.target_alert_service is not None:
+            self._current_alert_summary = list(
+                self.target_alert_service.summarize_alerts(target_alerts, star_alerts).get("lines", [])
+            )
+        else:
+            self._current_alert_summary = []
 
         self.table.setRowCount(len(render_rows))
         self._current_render_rows = []
+        self._current_cell_styles = []
 
         cycle_code = rows[0].get("settlement_cycle_code", "") if rows else settlement_cycle_display_code(record_date=record_date)
         self._current_cycle_code = str(cycle_code or "")
@@ -277,17 +397,21 @@ class PreviewTab(QWidget):
         for row_idx, row in enumerate(render_rows):
             values = self._build_row_values(row)
             self._current_render_rows.append(values)
+            row_styles: list[dict] = []
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 field_key = self.FIELD_KEYS[col_idx]
+                row_styles.append(self._build_export_cell_style(field_key, row, target_alerts, star_alerts))
                 if field_key == "account_manager_name":
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 elif field_key == "record_date":
                     item.setTextAlignment(Qt.AlignCenter)
                 else:
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                self._apply_alert_style(item, field_key, row, target_alerts, star_alerts)
                 self.table.setItem(row_idx, col_idx, item)
+            self._current_cell_styles.append(row_styles)
             if row_idx == summary_row_idx:
                 self._apply_summary_row_style(row_idx)
 
@@ -333,6 +457,8 @@ class PreviewTab(QWidget):
                 team_manager_name=team_manager_name,
                 headers=self.HEADERS,
                 rows=self._current_render_rows,
+                cell_styles=self._current_cell_styles,
+                alert_summary=self._current_alert_summary,
             )
         except Exception as exc:  # noqa: BLE001
             self.logger.exception(
