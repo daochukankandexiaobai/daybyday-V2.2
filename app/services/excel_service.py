@@ -7,7 +7,11 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from app.config.field_groups import EXCEL_RAW_RECORD_FIELD_KEYS
-from app.config.field_registry import DATA_TYPE_AMOUNT, DATA_TYPE_INT, get_field_spec
+from app.config.field_registry import DATA_TYPE_AMOUNT, DATA_TYPE_INT, DATA_TYPE_PERCENT, get_field_spec
+from app.db.database import DatabaseManager
+from app.fields.display_config_service import DisplayFieldConfigService
+from app.fields.field_value_service import FieldValueService
+from app.fields.registry import PAGE_EXCEL_EXPORT
 from app.utils.date_utils import settlement_cycle_display_code
 
 
@@ -19,6 +23,11 @@ class ExcelService:
         "account_manager_name_snapshot": "客户经理",
         "source_type": "来源",
     }
+
+    def __init__(self, db_manager=None) -> None:
+        self.db_manager = db_manager or DatabaseManager()
+        self.display_config_service = DisplayFieldConfigService(self.db_manager)
+        self.field_value_service = FieldValueService(self.db_manager)
 
     def export_company_report(
         self,
@@ -65,12 +74,13 @@ class ExcelService:
         return f"{company_name} 汇总（{start_date} ~ {end_date}）"
 
     def _write_raw_sheet(self, wb: Workbook, company_name: str, start_date: str, end_date: str, rows: list[dict]) -> None:
-        field_keys = list(EXCEL_RAW_RECORD_FIELD_KEYS)
-        headers = [self._raw_header_for_key(key) for key in field_keys]
+        field_defs = self._raw_field_definitions()
+        field_keys = [str(row.get("field_key", "")) for row in field_defs]
+        headers = [self._raw_header_for_def(row) for row in field_defs]
 
         data = []
         for r in rows:
-            data.append([self._raw_value_for_key(key, r) for key in field_keys])
+            data.append([self._raw_value_for_field_def(row, r) for row in field_defs])
 
         ws = wb.create_sheet("原始日报记录")
         self._write_table(
@@ -78,37 +88,82 @@ class ExcelService:
             title=self._title(company_name, start_date, end_date),
             headers=headers,
             rows=data,
-            amount_cols=self._raw_columns_by_type(field_keys, DATA_TYPE_AMOUNT),
-            int_cols=self._raw_columns_by_type(field_keys, DATA_TYPE_INT),
-            pct_cols=set(),
+            amount_cols=self._raw_columns_by_type(field_defs, DATA_TYPE_AMOUNT),
+            int_cols=self._raw_columns_by_type(field_defs, DATA_TYPE_INT),
+            pct_cols=self._raw_columns_by_type(field_defs, DATA_TYPE_PERCENT),
         )
 
-    @classmethod
-    def _raw_header_for_key(cls, field_key: str) -> str:
-        return cls._RAW_HEADER_OVERRIDES.get(field_key, get_field_spec(field_key).label)
+    def _raw_field_definitions(self) -> list[dict]:
+        configured = self.display_config_service.get_page_fields_with_fallback_keys(
+            page_key=PAGE_EXCEL_EXPORT,
+            fallback_field_keys=EXCEL_RAW_RECORD_FIELD_KEYS,
+        )
+        configured_by_key = {str(row.get("field_key", "")): row for row in configured}
+        result = []
+        seen = set()
+        for field_key in EXCEL_RAW_RECORD_FIELD_KEYS:
+            row = configured_by_key.get(field_key)
+            if row is None:
+                spec = get_field_spec(field_key)
+                row = {
+                    "field_key": field_key,
+                    "label": spec.label,
+                    "data_type": spec.data_type,
+                    "default_value": spec.default,
+                    "storage_type": spec.storage_type,
+                    "storage_column": spec.storage_column,
+                }
+            result.append(row)
+            seen.add(field_key)
 
-    @staticmethod
-    def _raw_value_for_key(field_key: str, row: dict):
+        for row in configured:
+            field_key = str(row.get("field_key", ""))
+            if not field_key or field_key in seen:
+                continue
+            if str(row.get("storage_type") or "") == "dynamic_metric":
+                result.append(row)
+                seen.add(field_key)
+        return result
+
+    @classmethod
+    def _raw_header_for_def(cls, field_def: dict) -> str:
+        field_key = str(field_def.get("field_key", ""))
+        spec = _get_field_spec_or_none(field_key)
+        fallback_label = spec.label if spec is not None else field_key
+        return cls._RAW_HEADER_OVERRIDES.get(field_key, str(field_def.get("label") or fallback_label))
+
+    def _raw_value_for_field_def(self, field_def: dict, row: dict):
+        field_key = str(field_def.get("field_key", ""))
         if field_key == "settlement_cycle_code":
             record_date = str(row.get("record_date", ""))
             if record_date.strip():
                 return settlement_cycle_display_code(record_date=record_date)
             return settlement_cycle_display_code(cycle_code=str(row.get("settlement_cycle_code", "")))
 
-        spec = get_field_spec(field_key)
-        value = row.get(field_key, spec.default)
-        if spec.data_type == DATA_TYPE_AMOUNT:
+        if str(field_def.get("storage_type") or "") == "dynamic_metric":
+            try:
+                return self.field_value_service.get_value(row, field_key)
+            except Exception:  # noqa: BLE001
+                pass
+
+        spec = _get_field_spec_or_none(field_key)
+        data_type = str(field_def.get("data_type") or (spec.data_type if spec is not None else "text"))
+        default_value = field_def.get("default_value", spec.default if spec is not None else "")
+        value = row.get(field_key, default_value)
+        if data_type == DATA_TYPE_AMOUNT:
             return float(value or 0)
-        if spec.data_type == DATA_TYPE_INT:
+        if data_type == DATA_TYPE_INT:
             return int(value or 0)
+        if data_type == DATA_TYPE_PERCENT:
+            return None if value is None or value == "" else float(value or 0)
         return value or ""
 
     @staticmethod
-    def _raw_columns_by_type(field_keys: list[str], data_type: str) -> set[int]:
+    def _raw_columns_by_type(field_defs: list[dict], data_type: str) -> set[int]:
         return {
             idx
-            for idx, key in enumerate(field_keys, start=1)
-            if get_field_spec(key).data_type == data_type
+            for idx, field_def in enumerate(field_defs, start=1)
+            if _field_def_data_type(field_def) == data_type
         }
 
     def _write_summary_sheet(
@@ -357,3 +412,18 @@ class ExcelService:
                     continue
                 max_len = max(max_len, len(str(value)))
             ws.column_dimensions[letter].width = min(max(10, max_len + 2), 52)
+
+
+def _get_field_spec_or_none(field_key: str):
+    try:
+        return get_field_spec(field_key)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _field_def_data_type(field_def: dict) -> str:
+    data_type = str(field_def.get("data_type") or "")
+    if data_type:
+        return data_type
+    spec = _get_field_spec_or_none(str(field_def.get("field_key", "")))
+    return str(spec.data_type if spec is not None else "text")

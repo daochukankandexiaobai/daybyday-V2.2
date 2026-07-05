@@ -4,7 +4,6 @@ from app.ui.layout_profile import LayoutProfile
 from app.ui.tabs.entry_navigation_helper import EntryNavigationHelper
 from app.ui.tabs.entry_table_config import (
     ENTRY_AMOUNT_COLUMNS,
-    ENTRY_COLUMN_CONFIGS,
     ENTRY_DISPLAY_HEADERS,
     ENTRY_EDITABLE_COLUMNS,
     ENTRY_FIELD_KEY_BY_COLUMN,
@@ -13,6 +12,8 @@ from app.ui.tabs.entry_table_config import (
     ENTRY_INT_COLUMNS,
     ENTRY_PRIMARY_COLUMNS,
     ENTRY_SUMMARY_COLUMNS,
+    build_entry_columns_from_config,
+    build_entry_table_metadata,
 )
 from app.utils.qt_compat import QApplication, QByteArray, QDate, QColor, QFont, QKeySequence, QShortcut, Qt, QTimer, Signal
 from app.utils.qt_compat import (
@@ -57,12 +58,14 @@ class EntryTab(QWidget):
     AMOUNT_COLS = set(ENTRY_AMOUNT_COLUMNS)
     SUMMARY_COLS = set(ENTRY_SUMMARY_COLUMNS)
     SUMMARY_LABEL = "团队汇总"
+    COLUMN_CONFIGS = build_entry_columns_from_config()
 
     def __init__(self, record_service, team_service, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.record_service = record_service
         self.team_service = team_service
         self.settings_service = getattr(team_service, "settings_service", None)
+        self._load_entry_column_configs()
         self._summary_row_index = -1
         self._suppress_item_changed = False
         self._suppress_header_state_save = False
@@ -78,6 +81,34 @@ class EntryTab(QWidget):
         self._restore_table_view_state_once()
         self._connect_app_shutdown_save()
         self.reload_teams()
+
+    def _load_entry_column_configs(self) -> None:
+        getter = getattr(self.record_service, "get_entry_field_definitions", None)
+        field_definitions = getter() if callable(getter) else None
+        self.COLUMN_CONFIGS = build_entry_columns_from_config(field_definitions)
+        metadata = build_entry_table_metadata(self.COLUMN_CONFIGS)
+        self.FIELD_KEYS = metadata["field_keys"]
+        self.HEADERS = metadata["headers"]
+        self.DISPLAY_HEADERS = metadata["display_headers"]
+        self.FIELD_KEY_BY_COLUMN = metadata["field_key_by_column"]
+        self.EDITABLE_COLS = set(metadata["editable_columns"])
+        self.PRIMARY_ENTRY_COLS = list(metadata["primary_columns"])
+        self.INT_COLS = set(metadata["int_columns"])
+        self.AMOUNT_COLS = set(metadata["amount_columns"])
+        self.SUMMARY_COLS = set(metadata["summary_columns"])
+
+    def reload_field_config(self) -> None:
+        self.persist_table_view_state()
+        self._load_entry_column_configs()
+        self._suppress_header_state_save = True
+        self.table.clear()
+        self.table.setColumnCount(len(self.HEADERS))
+        self.table.setHorizontalHeaderLabels(self.DISPLAY_HEADERS)
+        self._apply_table_column_layout()
+        self._suppress_header_state_save = False
+        self._header_state_restore_attempted = False
+        self._restore_table_view_state_once()
+        self.load_sheet()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -255,9 +286,8 @@ class EntryTab(QWidget):
     def _settings_available(self) -> bool:
         return self.settings_service is not None
 
-    @classmethod
-    def _header_state_signature(cls) -> str:
-        return "|".join(cls.FIELD_KEYS)
+    def _header_state_signature(self) -> str:
+        return "|".join(self.FIELD_KEYS)
 
     def _schedule_header_state_save(self, *_args) -> None:
         if self._suppress_header_state_save or not self._settings_available():
@@ -334,16 +364,14 @@ class EntryTab(QWidget):
             return True
         return bool(item.flags() & Qt.ItemIsEditable)
 
-    @classmethod
-    def _field_key_for_col(cls, col: int) -> str:
-        return cls.FIELD_KEY_BY_COLUMN.get(col, "")
+    def _field_key_for_col(self, col: int) -> str:
+        return self.FIELD_KEY_BY_COLUMN.get(col, "")
 
-    @classmethod
-    def _is_remark_col(cls, col: int) -> bool:
-        return cls._field_key_for_col(col) == "remark"
+    def _is_remark_col(self, col: int) -> bool:
+        return self._field_key_for_col(col) == "remark"
 
     def _entry_cell_text_from_row(self, row: dict, col: int) -> str:
-        cfg = ENTRY_COLUMN_CONFIGS[col]
+        cfg = self.COLUMN_CONFIGS[col]
         value = row.get(cfg.field_key, cfg.default)
         if cfg.field_key == "account_manager_name":
             value = row.get("account_manager_name", value)
@@ -441,7 +469,7 @@ class EntryTab(QWidget):
         self.table.setRowCount(len(rows) + 1)
         for row_idx, row in enumerate(rows):
             account_manager_id = int(row.get("account_manager_id", 0))
-            for col, cfg in enumerate(ENTRY_COLUMN_CONFIGS):
+            for col, cfg in enumerate(self.COLUMN_CONFIGS):
                 self._set_cell(
                     row_idx,
                     col,
@@ -541,64 +569,73 @@ class EntryTab(QWidget):
             return
         self._refresh_summary_row()
 
+    def collect_row_values_by_field_key(self, row_idx: int) -> dict:
+        name_item = self.table.item(row_idx, 0)
+        if name_item is None:
+            raise ValueError(f"第{row_idx + 1}行缺少客户经理")
+
+        account_manager_id = int(name_item.data(Qt.UserRole) or 0)
+        name = name_item.text().strip()
+        if account_manager_id <= 0 or not name:
+            raise ValueError(f"第{row_idx + 1}行客户经理信息无效")
+
+        values = {
+            "account_manager_id": account_manager_id,
+            "account_manager_name": name,
+        }
+
+        for col, cfg in enumerate(self.COLUMN_CONFIGS):
+            if cfg.field_key == "account_manager_name":
+                continue
+
+            text = self._cell_text(row_idx, col)
+            if cfg.required and text == "":
+                raise ValueError(f"第{row_idx + 1}行[{self.HEADERS[col]}] 不能为空")
+
+            if col in self.INT_COLS:
+                ok, value, err = validate_non_negative_int_input(text)
+                if not ok:
+                    raise ValueError(f"第{row_idx + 1}行[{self.HEADERS[col]}] {err}")
+                values[cfg.field_key] = int(value)
+            elif col in self.AMOUNT_COLS:
+                ok, value, err = validate_non_negative_decimal_input(text, max_decimals=2)
+                if not ok:
+                    raise ValueError(f"第{row_idx + 1}行[{self.HEADERS[col]}] {err}")
+                values[cfg.field_key] = float(value)
+            else:
+                values[cfg.field_key] = text
+
+        return values
+
+    def validate_entry_values(self, row_idx: int, values: dict) -> list[str]:
+        soft_warnings: list[str] = []
+
+        visit = int(values.get("visit_count_daily", 0) or 0)
+        invalid_visit = int(values.get("invalid_visit_count_daily", 0) or 0)
+        quality_visit = int(values.get("quality_visit_count_daily", 0) or 0)
+        signing = int(values.get("signing_count_daily", 0) or 0)
+        approval = int(values.get("approval_customer_count_daily", 0) or 0)
+        repayment_customers = int(values.get("repayment_customer_count_daily", 0) or 0)
+
+        if invalid_visit > visit:
+            raise ValueError(f"第{row_idx + 1}行无效上门不能大于总上门")
+        if quality_visit > visit:
+            raise ValueError(f"第{row_idx + 1}行优质上门不能大于总上门")
+
+        if approval > signing:
+            soft_warnings.append(f"第{row_idx + 1}行批复客户数大于签约量（允许保存）")
+        if repayment_customers > visit:
+            soft_warnings.append(f"第{row_idx + 1}行回款客户数大于上门量（允许保存）")
+        return soft_warnings
+
     def _validate_and_collect_rows(self) -> tuple[list[dict], list[str]]:
         rows: list[dict] = []
         soft_warnings: list[str] = []
 
         for row_idx in range(self._data_row_count()):
-            name_item = self.table.item(row_idx, 0)
-            if name_item is None:
-                raise ValueError(f"第{row_idx + 1}行缺少客户经理")
-
-            account_manager_id = int(name_item.data(Qt.UserRole) or 0)
-            name = name_item.text().strip()
-            if account_manager_id <= 0 or not name:
-                raise ValueError(f"第{row_idx + 1}行客户经理信息无效")
-
-            parsed_by_key: dict[str, int | float] = {}
-            for col in self.INT_COLS:
-                ok, value, err = validate_non_negative_int_input(self._cell_text(row_idx, col))
-                if not ok:
-                    raise ValueError(f"第{row_idx + 1}行[{self.HEADERS[col]}] {err}")
-                parsed_by_key[self._field_key_for_col(col)] = value
-
-            for col in self.AMOUNT_COLS:
-                ok, value, err = validate_non_negative_decimal_input(self._cell_text(row_idx, col), max_decimals=2)
-                if not ok:
-                    raise ValueError(f"第{row_idx + 1}行[{self.HEADERS[col]}] {err}")
-                parsed_by_key[self._field_key_for_col(col)] = value
-
-            visit = int(parsed_by_key.get("visit_count_daily", 0))
-            invalid_visit = int(parsed_by_key.get("invalid_visit_count_daily", 0))
-            quality_visit = int(parsed_by_key.get("quality_visit_count_daily", 0))
-            signing = int(parsed_by_key.get("signing_count_daily", 0))
-            approval = int(parsed_by_key.get("approval_customer_count_daily", 0))
-            repayment_customers = int(parsed_by_key.get("repayment_customer_count_daily", 0))
-
-            if invalid_visit > visit:
-                raise ValueError(f"第{row_idx + 1}行无效上门不能大于总上门")
-            if quality_visit > visit:
-                raise ValueError(f"第{row_idx + 1}行优质上门不能大于总上门")
-
-            if approval > signing:
-                soft_warnings.append(f"第{row_idx + 1}行批复客户数大于签约量（允许保存）")
-            if repayment_customers > visit:
-                soft_warnings.append(f"第{row_idx + 1}行回款客户数大于上门量（允许保存）")
-
-            row = {
-                "account_manager_id": account_manager_id,
-                "account_manager_name": name,
-            }
-            for col, cfg in enumerate(ENTRY_COLUMN_CONFIGS):
-                if cfg.field_key == "account_manager_name":
-                    continue
-                if cfg.field_key == "remark":
-                    row["remark"] = self._cell_text(row_idx, col)
-                elif col in self.AMOUNT_COLS:
-                    row[cfg.field_key] = float(parsed_by_key.get(cfg.field_key, 0.0))
-                elif col in self.INT_COLS:
-                    row[cfg.field_key] = int(parsed_by_key.get(cfg.field_key, 0))
-            rows.append(row)
+            values = self.collect_row_values_by_field_key(row_idx)
+            soft_warnings.extend(self.validate_entry_values(row_idx, values))
+            rows.append(values)
 
         return rows, soft_warnings
 
@@ -772,7 +809,7 @@ class EntryTab(QWidget):
         max_lines = 1
         self._suppress_header_state_save = True
         try:
-            for col, cfg in enumerate(ENTRY_COLUMN_CONFIGS):
+            for col, cfg in enumerate(self.COLUMN_CONFIGS):
                 min_width = self._scale(cfg.min_width, 64)
                 preferred_width = self._scale(int(round(cfg.preferred_width * width_factor)), min_width)
                 final_width = max(min_width, preferred_width)

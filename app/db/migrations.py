@@ -9,7 +9,7 @@ from app.utils.log_utils import get_logger
 
 DEFAULT_TEMPLATE_NAME = "V1.0日报模板"
 DEFAULT_TEMPLATE_VERSION = "2026.04.01"
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.5"
 BUSINESS_RULES_VERSION = "1.1"
 
 LOGGER = get_logger("migrations")
@@ -44,6 +44,177 @@ def _ensure_column(conn, table_name: str, column_name: str, ddl: str) -> None:
 
 def _has_column(conn, table_name: str, column_name: str) -> bool:
     return column_name in _table_columns(conn, table_name)
+
+
+def _ensure_field_config_tables(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS field_definitions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_key TEXT UNIQUE NOT NULL,
+            label TEXT NOT NULL,
+            data_type TEXT NOT NULL,
+            category TEXT NOT NULL,
+            group_key TEXT,
+            editable INTEGER DEFAULT 0,
+            required INTEGER DEFAULT 0,
+            default_value TEXT,
+            aggregation TEXT DEFAULT 'none',
+            formula_id TEXT,
+            enabled INTEGER DEFAULT 1,
+            system_field INTEGER DEFAULT 0,
+            storage_type TEXT DEFAULT 'display_only',
+            storage_column TEXT,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        """
+    )
+    for column_name, ddl in [
+        ("field_key", "TEXT NOT NULL DEFAULT ''"),
+        ("label", "TEXT NOT NULL DEFAULT ''"),
+        ("data_type", "TEXT NOT NULL DEFAULT 'text'"),
+        ("category", "TEXT NOT NULL DEFAULT 'display'"),
+        ("group_key", "TEXT"),
+        ("editable", "INTEGER DEFAULT 0"),
+        ("required", "INTEGER DEFAULT 0"),
+        ("default_value", "TEXT"),
+        ("aggregation", "TEXT DEFAULT 'none'"),
+        ("formula_id", "TEXT"),
+        ("enabled", "INTEGER DEFAULT 1"),
+        ("system_field", "INTEGER DEFAULT 0"),
+        ("storage_type", "TEXT DEFAULT 'display_only'"),
+        ("storage_column", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]:
+        _ensure_column(conn, "field_definitions", column_name, ddl)
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS field_page_visibility (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            field_key TEXT NOT NULL,
+            page_key TEXT NOT NULL,
+            visible INTEGER DEFAULT 1,
+            group_key TEXT,
+            display_order INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(field_key, page_key),
+            FOREIGN KEY(field_key) REFERENCES field_definitions(field_key)
+        );
+        """
+    )
+    for column_name, ddl in [
+        ("field_key", "TEXT NOT NULL DEFAULT ''"),
+        ("page_key", "TEXT NOT NULL DEFAULT ''"),
+        ("visible", "INTEGER DEFAULT 1"),
+        ("group_key", "TEXT"),
+        ("display_order", "INTEGER DEFAULT 0"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]:
+        _ensure_column(conn, "field_page_visibility", column_name, ddl)
+
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS view_templates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_key TEXT UNIQUE NOT NULL,
+            template_name TEXT NOT NULL,
+            page_key TEXT NOT NULL,
+            config_json TEXT NOT NULL,
+            is_default INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT,
+            updated_at TEXT
+        );
+        """
+    )
+    for column_name, ddl in [
+        ("template_key", "TEXT NOT NULL DEFAULT ''"),
+        ("template_name", "TEXT NOT NULL DEFAULT ''"),
+        ("page_key", "TEXT NOT NULL DEFAULT ''"),
+        ("config_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("is_default", "INTEGER DEFAULT 0"),
+        ("enabled", "INTEGER DEFAULT 1"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]:
+        _ensure_column(conn, "view_templates", column_name, ddl)
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_field_definitions_key "
+        "ON field_definitions(field_key);"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_field_page_visibility_unique "
+        "ON field_page_visibility(field_key, page_key);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_field_page_visibility_page "
+        "ON field_page_visibility(page_key, display_order);"
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_view_templates_key "
+        "ON view_templates(template_key);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_view_templates_page "
+        "ON view_templates(page_key, is_default DESC, enabled DESC);"
+    )
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS trg_field_definitions_no_delete_system
+        BEFORE DELETE ON field_definitions
+        WHEN OLD.system_field = 1
+        BEGIN
+            SELECT RAISE(ABORT, 'system field cannot be deleted');
+        END;
+        """
+    )
+
+
+def _ensure_dynamic_metric_value_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS daily_metric_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            record_id INTEGER NOT NULL,
+            field_key TEXT NOT NULL,
+            value_number REAL,
+            value_text TEXT,
+            created_at TEXT,
+            updated_at TEXT,
+            UNIQUE(record_id, field_key),
+            FOREIGN KEY(record_id) REFERENCES daily_records(id) ON DELETE CASCADE,
+            FOREIGN KEY(field_key) REFERENCES field_definitions(field_key)
+        );
+        """
+    )
+    for column_name, ddl in [
+        ("record_id", "INTEGER NOT NULL DEFAULT 0"),
+        ("field_key", "TEXT NOT NULL DEFAULT ''"),
+        ("value_number", "REAL"),
+        ("value_text", "TEXT"),
+        ("created_at", "TEXT"),
+        ("updated_at", "TEXT"),
+    ]:
+        _ensure_column(conn, "daily_metric_values", column_name, ddl)
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_metric_values_unique "
+        "ON daily_metric_values(record_id, field_key);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daily_metric_values_record "
+        "ON daily_metric_values(record_id);"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daily_metric_values_field "
+        "ON daily_metric_values(field_key);"
+    )
 
 
 def _migrate_legacy_daily_records(conn) -> None:
@@ -542,6 +713,8 @@ def run_migrations(db_manager) -> None:
             "CREATE INDEX IF NOT EXISTS idx_admin_action_logs_target ON admin_action_logs(target_type, target_id);"
         )
 
+        _ensure_field_config_tables(conn)
+        _ensure_dynamic_metric_value_table(conn)
         _bootstrap_defaults(conn)
         conn.commit()
     LOGGER.info("数据库迁移完成，schema_version=%s business_rules_version=%s", SCHEMA_VERSION, BUSINESS_RULES_VERSION)
@@ -655,4 +828,17 @@ def _bootstrap_defaults(conn) -> None:
         "INSERT INTO app_settings (key, value) VALUES ('current_team_id', ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (str(team_id),),
+    )
+
+    from app.fields.field_config_service import bootstrap_default_field_config
+
+    field_config_result = bootstrap_default_field_config(conn)
+    LOGGER.info(
+        "字段配置默认值同步完成 fields=%s visibility=%s templates=%s inserted_fields=%s inserted_visibility=%s inserted_templates=%s",
+        field_config_result.get("field_count"),
+        field_config_result.get("visibility_count"),
+        field_config_result.get("template_count"),
+        field_config_result.get("inserted_fields"),
+        field_config_result.get("inserted_visibility"),
+        field_config_result.get("inserted_templates"),
     )

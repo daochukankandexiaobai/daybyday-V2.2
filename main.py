@@ -18,6 +18,7 @@ from app.db.repositories import (
     TemplateRepository,
     WeeklyTargetRepository,
 )
+from app.fields.field_value_service import FieldValueService
 from app.services.auth_service import AuthService
 from app.services.admin_action_log_service import AdminActionLogService
 from app.services.admin_data_service import AdminDataService
@@ -25,6 +26,7 @@ from app.services.admin_team_service import AdminTeamService
 from app.services.analytics_service import AnalyticsService
 from app.services.excel_service import ExcelService
 from app.services.export_service import ExportService
+from app.services.field_admin_config_service import FieldAdminConfigService
 from app.services.import_service import ImportService
 from app.services.legacy_migration_service import LegacyMigrationService
 from app.services.record_service import RecordService
@@ -57,6 +59,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
     cycle_target_repo = CycleTargetRepository(db_manager)
     weekly_target_repo = WeeklyTargetRepository(db_manager)
     record_repo = DailyRecordRepository(db_manager)
+    field_value_service = FieldValueService(db_manager)
 
     settings_service = SettingsService(settings_repo)
     view_scale_service = ViewScaleService(settings_service)
@@ -68,6 +71,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
         account_manager_repo=account_manager_repo,
         cycle_target_repo=cycle_target_repo,
         template_service=template_service,
+        field_value_service=field_value_service,
     )
     analytics_service = AnalyticsService(record_service=record_service)
     weekly_target_service = WeeklyTargetService(
@@ -101,6 +105,10 @@ def build_services(db_manager: DatabaseManager) -> dict:
         record_service=record_service,
         admin_action_log_service=admin_action_log_service,
     )
+    field_admin_config_service = FieldAdminConfigService(
+        db_manager,
+        admin_action_log_service=admin_action_log_service,
+    )
 
     services = {
         "settings_service": settings_service,
@@ -108,6 +116,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
         "template_service": template_service,
         "team_service": team_service,
         "record_service": record_service,
+        "field_value_service": field_value_service,
         "analytics_service": analytics_service,
         "weekly_target_service": weekly_target_service,
         "target_progress_service": target_progress_service,
@@ -144,12 +153,13 @@ def build_services(db_manager: DatabaseManager) -> dict:
             target_alert_service=target_alert_service,
             star_customer_alert_service=star_customer_alert_service,
         ),
-        "excel_service": ExcelService(),
-        "report_image_service": ReportImageService(),
+        "excel_service": ExcelService(db_manager),
+        "report_image_service": ReportImageService(db_manager),
         "ui_scale_manager": UIScaleManager(view_scale_service),
         "admin_action_log_service": admin_action_log_service,
         "admin_team_service": admin_team_service,
         "admin_data_service": admin_data_service,
+        "field_admin_config_service": field_admin_config_service,
     }
     return services
 

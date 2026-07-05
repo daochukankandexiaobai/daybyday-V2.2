@@ -39,6 +39,7 @@ class ImportService:
         self.team_service = team_service
         self.team_repo = team_repo or getattr(team_service, "team_repo", None)
         self.account_manager_repo = account_manager_repo or getattr(team_service, "account_manager_repo", None)
+        self.field_value_service = getattr(record_service, "field_value_service", None)
 
     def import_files(self, file_paths: list[str], allow_template_mismatch: bool = False) -> list[dict]:
         results: list[dict] = []
@@ -420,6 +421,7 @@ class ImportService:
         master_context: dict[str, Any] | None = None,
     ) -> tuple[bool, str, dict[str, Any]]:
         incoming = normalize_record(raw_record)
+        incoming["_dynamic_metric_values"] = self._extract_dynamic_metric_values(raw_record)
         incoming["template_version"] = incoming["template_version"] or file_template_version
 
         if not incoming["record_id"]:
@@ -588,7 +590,8 @@ class ImportService:
             return self._resolve_existing(existing_by_unique, incoming, "unique")
 
         try:
-            self.record_repo.insert(incoming)
+            new_row_id = self.record_repo.insert(incoming)
+            self._apply_dynamic_values(new_row_id, incoming)
             self.logger.info(
                 "导入新增成功 record_id=%s date=%s team_id=%s account_manager_id=%s",
                 incoming.get("record_id"),
@@ -615,6 +618,9 @@ class ImportService:
         existing_hash = str(existing.get("record_hash", ""))
         incoming_hash = str(incoming.get("record_hash", ""))
         if existing_hash == incoming_hash:
+            if self._dynamic_values_changed(int(existing.get("id", 0) or 0), incoming):
+                self._apply_dynamic_values(int(existing.get("id", 0) or 0), incoming)
+                return "updated", "动态字段已更新", 1
             return "skipped", "同版本同内容，已跳过", 0
 
         if mode == "record_id":
@@ -646,12 +652,63 @@ class ImportService:
                 updates[key] = incoming[key]
 
         self.record_repo.update_by_id(int(existing["id"]), updates)
+        self._apply_dynamic_values(int(existing["id"]), incoming)
         self.logger.info(
             "导入更新成功 id=%s record_id=%s version=%s",
             existing.get("id"),
             incoming.get("record_id"),
             incoming.get("version"),
         )
+
+    def _extract_dynamic_metric_values(self, raw_record: dict[str, Any]) -> dict[str, Any]:
+        if self.field_value_service is None:
+            return {}
+        try:
+            with self.record_repo.db.get_connection() as conn:
+                rows = conn.execute(
+                    """
+                    SELECT field_key
+                    FROM field_definitions
+                    WHERE enabled = 1
+                      AND category = 'raw_daily'
+                      AND storage_type = 'dynamic_metric'
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+        except Exception:  # noqa: BLE001
+            return {}
+
+        values: dict[str, Any] = {}
+        for row in rows:
+            field_key = str(row["field_key"])
+            if field_key in raw_record:
+                values[field_key] = raw_record.get(field_key)
+        return values
+
+    def _apply_dynamic_values(self, row_id: int, incoming: dict[str, Any]) -> None:
+        if self.field_value_service is None:
+            return
+        values = incoming.get("_dynamic_metric_values", {})
+        if not values:
+            return
+        self.field_value_service.set_values(int(row_id), values)
+
+    def _dynamic_values_changed(self, row_id: int, incoming: dict[str, Any]) -> bool:
+        if self.field_value_service is None or int(row_id or 0) <= 0:
+            return False
+        values = incoming.get("_dynamic_metric_values", {})
+        if not values:
+            return False
+        current = self.field_value_service.get_values(int(row_id), values.keys())
+        for field_key, raw_value in values.items():
+            try:
+                field_def = self.field_value_service._get_field_def(field_key)
+                normalized = self.field_value_service.normalize_value(field_def, raw_value)
+            except Exception:  # noqa: BLE001
+                normalized = raw_value
+            if current.get(field_key) != normalized:
+                return True
+        return False
 
     def _log_and_collect(
         self,

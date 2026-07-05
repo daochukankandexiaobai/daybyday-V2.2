@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Dict, Optional, Tuple
 
 from app.config.field_registry import FieldSpec
 from app.utils import field_utils
@@ -14,22 +14,22 @@ class FieldService:
     surface at a time in later batches.
     """
 
-    def get_field(self, field_key: str) -> FieldSpec | None:
+    def get_field(self, field_key: str) -> Optional[FieldSpec]:
         return field_utils.get_field(field_key)
 
     def require_field(self, field_key: str) -> FieldSpec:
         return field_utils.require_field(field_key)
 
-    def list_fields(self, *, include_future: bool = True, include_display: bool = True) -> tuple[FieldSpec, ...]:
+    def list_fields(self, *, include_future: bool = True, include_display: bool = True) -> Tuple[FieldSpec, ...]:
         return field_utils.list_fields(include_future=include_future, include_display=include_display)
 
-    def list_daily_metric_fields(self, *, include_future: bool = True) -> tuple[FieldSpec, ...]:
+    def list_daily_metric_fields(self, *, include_future: bool = True) -> Tuple[FieldSpec, ...]:
         return field_utils.list_daily_metric_fields(include_future=include_future)
 
-    def list_group_fields(self, group_key: str, *, include_future: bool = True) -> tuple[FieldSpec, ...]:
+    def list_group_fields(self, group_key: str, *, include_future: bool = True) -> Tuple[FieldSpec, ...]:
         return field_utils.list_fields_for_group(group_key, include_future=include_future)
 
-    def list_profile_fields(self, profile_key: str, *, include_future: bool = True) -> tuple[FieldSpec, ...]:
+    def list_profile_fields(self, profile_key: str, *, include_future: bool = True) -> Tuple[FieldSpec, ...]:
         return field_utils.list_fields_for_profile(profile_key, include_future=include_future)
 
     def label_for(self, field_key: str, fallback: str = "") -> str:
@@ -47,6 +47,5 @@ class FieldService:
     def format_value(self, field_key: str, value: Any) -> str:
         return field_utils.format_field_value(field_key, value)
 
-    def build_default_daily_metrics(self, *, include_future: bool = True) -> dict[str, Any]:
+    def build_default_daily_metrics(self, *, include_future: bool = True) -> Dict[str, Any]:
         return field_utils.build_default_daily_metrics(include_future=include_future)
-

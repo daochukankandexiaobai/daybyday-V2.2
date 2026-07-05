@@ -24,6 +24,7 @@ from app.ui.tabs.analysis_tab import AnalysisTab
 from app.ui.tabs.conflict_tab import ConflictTab
 from app.ui.tabs.entry_tab import EntryTab
 from app.ui.tabs.export_tab import ExportTab
+from app.ui.tabs.field_report_config_tab import FieldReportConfigTab
 from app.ui.tabs.import_tab import ImportTab
 from app.ui.tabs.local_data_manage_tab import LocalDataManageTab
 from app.ui.tabs.logs_tab import LogsTab
@@ -467,6 +468,10 @@ class MainWindow(QMainWindow):
             operator_getter=self.get_admin_operator,
         )
         self.admin_action_logs_tab = AdminActionLogsTab(self.services["admin_action_log_service"])
+        self.field_report_config_tab = FieldReportConfigTab(
+            self.services["field_admin_config_service"],
+            operator_getter=self.get_admin_operator,
+        )
 
         self.manager_tabs = [
             ("基础设置", self.team_setup_tab),
@@ -478,6 +483,7 @@ class MainWindow(QMainWindow):
         ]
         self.admin_tabs = [
             ("团队配置管理", self.admin_team_manage_tab),
+            ("字段与报表配置", self.field_report_config_tab),
             ("本地数据管理", self.local_data_manage_tab),
             ("JSON导入", self.import_tab),
             ("数据迁移（旧版JSON）", self.legacy_migration_tab),
@@ -537,6 +543,8 @@ class MainWindow(QMainWindow):
         self.local_data_manage_tab.records_changed.connect(self.analysis_tab.on_query)
         self.local_data_manage_tab.records_changed.connect(self.admin_action_logs_tab.on_query)
 
+        self.field_report_config_tab.config_changed.connect(self.on_field_config_changed)
+        self.field_report_config_tab.config_changed.connect(self.admin_action_logs_tab.on_query)
         self.template_tab.template_changed.connect(self.settings_tab.load_settings)
         self.settings_tab.view_scale_changed.connect(self.on_view_scale_changed_from_settings)
 
@@ -558,6 +566,20 @@ class MainWindow(QMainWindow):
         self.analysis_tab.reload_teams()
         self.export_tab.reload_teams()
         self.local_data_manage_tab.reload_team_filters()
+
+    def on_field_config_changed(self) -> None:
+        reload_entry = getattr(self.entry_tab, "reload_field_config", None)
+        if callable(reload_entry):
+            reload_entry()
+        reload_preview = getattr(self.preview_tab, "reload_field_config", None)
+        if callable(reload_preview):
+            reload_preview()
+        reload_query = getattr(self.query_tab, "reload_field_config", None)
+        if callable(reload_query):
+            reload_query()
+        reload_analysis = getattr(self.analysis_tab, "reload_field_config", None)
+        if callable(reload_analysis):
+            reload_analysis()
 
     def on_view_import_data_requested(self, context: dict) -> None:
         tab_index = self.tabs.indexOf(self.query_tab)

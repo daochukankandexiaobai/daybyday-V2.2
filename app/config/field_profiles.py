@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Dict, Tuple
 
 from app.config.field_groups import (
     ANALYSIS_METRIC_FIELD_KEYS,
@@ -26,7 +27,7 @@ PROFILE_PNG_SECTIONS = "png_sections"
 class FieldProfile:
     key: str
     label: str
-    field_keys: tuple[str, ...]
+    field_keys: Tuple[str, ...]
     description: str = ""
 
 
@@ -36,10 +37,10 @@ class PngSectionProfile:
     index: int
     title: str
     file_suffix: str
-    field_keys: tuple[str, ...]
+    field_keys: Tuple[str, ...]
 
 
-PREVIEW_TABLE_FIELD_KEYS: tuple[str, ...] = (
+PREVIEW_TABLE_FIELD_KEYS: Tuple[str, ...] = (
     "record_date",
     "account_manager_name",
     "cycle_target",
@@ -73,10 +74,10 @@ PREVIEW_TABLE_FIELD_KEYS: tuple[str, ...] = (
     "large_order_repayment_amount_daily",
 )
 
-ENTRY_LEGACY_FIELD_KEYS: tuple[str, ...] = ENTRY_INPUT_FIELD_KEYS
+ENTRY_LEGACY_FIELD_KEYS: Tuple[str, ...] = ENTRY_INPUT_FIELD_KEYS
 
 
-FIELD_PROFILES: tuple[FieldProfile, ...] = (
+FIELD_PROFILES: Tuple[FieldProfile, ...] = (
     FieldProfile(
         key=PROFILE_ENTRY_INPUT,
         label="数据录入字段",
@@ -109,9 +110,9 @@ FIELD_PROFILES: tuple[FieldProfile, ...] = (
     ),
 )
 
-FIELD_PROFILE_MAP: dict[str, FieldProfile] = {profile.key: profile for profile in FIELD_PROFILES}
+FIELD_PROFILE_MAP: Dict[str, FieldProfile] = {profile.key: profile for profile in FIELD_PROFILES}
 
-PNG_SECTION_PROFILES: tuple[PngSectionProfile, ...] = (
+PNG_SECTION_PROFILES: Tuple[PngSectionProfile, ...] = (
     PngSectionProfile(
         key="core_progress",
         index=1,
@@ -147,5 +148,5 @@ def get_field_profile(profile_key: str) -> FieldProfile:
     return FIELD_PROFILE_MAP[profile_key]
 
 
-def get_profile_field_keys(profile_key: str) -> tuple[str, ...]:
+def get_profile_field_keys(profile_key: str) -> Tuple[str, ...]:
     return get_field_profile(profile_key).field_keys

@@ -23,12 +23,11 @@ from app.utils.qt_compat import (
 from app.utils.date_utils import settlement_cycle_display_code
 from app.utils.format_utils import format_int, format_money, format_percent
 from app.utils.log_utils import get_logger
-from app.utils.metrics_utils import ratio_or_none
 
 
 class PreviewTab(QWidget):
-    FIELD_KEYS = list(get_profile_field_keys(PROFILE_PREVIEW_TABLE))
-    HEADERS: list[str] = [get_field_spec(key).label for key in FIELD_KEYS]
+    DEFAULT_FIELD_KEYS = list(get_profile_field_keys(PROFILE_PREVIEW_TABLE))
+    DEFAULT_HEADERS: list[str] = [get_field_spec(key).label for key in DEFAULT_FIELD_KEYS]
     SUMMARY_LABEL = "团队汇总"
 
     def __init__(
@@ -51,6 +50,11 @@ class PreviewTab(QWidget):
 
         self.logger = get_logger("preview_tab")
 
+        self.field_definitions = self._load_field_definitions()
+        self.field_keys = [str(row.get("field_key", "")) for row in self.field_definitions]
+        self.headers = [str(row.get("label", "")) for row in self.field_definitions]
+        self._field_def_map = {str(row.get("field_key", "")): row for row in self.field_definitions}
+
         self._current_cycle_code = ""
         self._current_render_rows: list[list[str]] = []
         self._current_cell_styles: list[list[dict]] = []
@@ -58,6 +62,31 @@ class PreviewTab(QWidget):
 
         self._build_ui()
         self.reload_teams()
+
+    def _load_field_definitions(self) -> list[dict]:
+        getter = getattr(self.record_service, "get_today_display_field_definitions", None)
+        if callable(getter):
+            rows = getter()
+            if rows:
+                return rows
+        return [
+            {
+                "field_key": field_key,
+                "label": get_field_spec(field_key).label,
+                "data_type": get_field_spec(field_key).data_type,
+            }
+            for field_key in self.DEFAULT_FIELD_KEYS
+        ]
+
+    def reload_field_config(self) -> None:
+        self.field_definitions = self._load_field_definitions()
+        self.field_keys = [str(row.get("field_key", "")) for row in self.field_definitions]
+        self.headers = [str(row.get("label", "")) for row in self.field_definitions]
+        self._field_def_map = {str(row.get("field_key", "")): row for row in self.field_definitions}
+        self.table.clear()
+        self.table.setColumnCount(len(self.headers))
+        self.table.setHorizontalHeaderLabels(self.headers)
+        self.refresh()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -95,8 +124,8 @@ class PreviewTab(QWidget):
         tools.addWidget(self.cycle_label)
         tools.addStretch()
 
-        self.table = QTableWidget(0, len(self.HEADERS))
-        self.table.setHorizontalHeaderLabels(self.HEADERS)
+        self.table = QTableWidget(0, len(self.headers))
+        self.table.setHorizontalHeaderLabels(self.headers)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -168,80 +197,33 @@ class PreviewTab(QWidget):
         self.date_edit.setDate(QDate.currentDate())
         self.refresh()
 
-    @staticmethod
-    def _format_field_value(field_key: str, row: dict) -> str:
-        spec = get_field_spec(field_key)
+    def _field_data_type(self, field_key: str) -> str:
+        field_def = self._field_def_map.get(field_key, {})
+        data_type = str(field_def.get("data_type", "") or "")
+        if data_type:
+            return data_type
+        return get_field_spec(field_key).data_type
+
+    def _format_field_value(self, field_key: str, row: dict) -> str:
+        data_type = self._field_data_type(field_key)
         value = row.get(field_key)
-        if spec.data_type == DATA_TYPE_AMOUNT:
+        if data_type == DATA_TYPE_AMOUNT:
             return format_money(value)
-        if spec.data_type == DATA_TYPE_INT:
+        if data_type == DATA_TYPE_INT:
             return format_int(value)
-        if spec.data_type == DATA_TYPE_PERCENT:
+        if data_type == DATA_TYPE_PERCENT:
             return format_percent(value)
         return str(value or "")
 
     def _build_row_values(self, row: dict) -> list[str]:
-        return [self._format_field_value(field_key, row) for field_key in self.FIELD_KEYS]
+        return [self._format_field_value(field_key, row) for field_key in self.field_keys]
 
     def _build_summary_row(self, rows: list[dict], record_date: str) -> dict:
-        cycle_target = sum(float(row.get("cycle_target", 0) or 0) for row in rows)
-        repayment_amount_cumulative = sum(float(row.get("repayment_amount_cumulative", 0) or 0) for row in rows)
-        loan_amount_cumulative = sum(float(row.get("loan_amount_cumulative", 0) or 0) for row in rows)
-        repayment_amount_daily = sum(float(row.get("repayment_amount_daily", 0) or 0) for row in rows)
-        loan_amount_daily = sum(float(row.get("loan_amount_daily", 0) or 0) for row in rows)
-        intention_daily = sum(int(row.get("intention_daily", 0) or 0) for row in rows)
-        wechat_count_daily = sum(int(row.get("wechat_count_daily", 0) or 0) for row in rows)
-        visit_count_daily = sum(int(row.get("visit_count_daily", 0) or 0) for row in rows)
-        invitation_cumulative = sum(int(row.get("invitation_cumulative", 0) or 0) for row in rows)
-        invalid_visit_count_daily = sum(int(row.get("invalid_visit_count_daily", 0) or 0) for row in rows)
-        four_star_customer_count_daily = sum(int(row.get("four_star_customer_count_daily", 0) or 0) for row in rows)
-        five_star_customer_count_daily = sum(int(row.get("five_star_customer_count_daily", 0) or 0) for row in rows)
-        signing_count_daily = sum(int(row.get("signing_count_daily", 0) or 0) for row in rows)
-        signing_count_cumulative = sum(int(row.get("signing_count_cumulative", 0) or 0) for row in rows)
-        quality_visit_count_daily = sum(int(row.get("quality_visit_count_daily", 0) or 0) for row in rows)
-        quality_visit_count_cumulative = sum(int(row.get("quality_visit_count_cumulative", 0) or 0) for row in rows)
-        approval_customer_count_daily = sum(int(row.get("approval_customer_count_daily", 0) or 0) for row in rows)
-        repayment_customer_count_daily = sum(int(row.get("repayment_customer_count_daily", 0) or 0) for row in rows)
-        debt_case_submit_count_daily = sum(int(row.get("debt_case_submit_count_daily", 0) or 0) for row in rows)
-        debt_case_repayment_count_daily = sum(int(row.get("debt_case_repayment_count_daily", 0) or 0) for row in rows)
-        debt_case_repayment_amount_daily = sum(float(row.get("debt_case_repayment_amount_daily", 0) or 0) for row in rows)
-        large_order_repayment_count_daily = sum(int(row.get("large_order_repayment_count_daily", 0) or 0) for row in rows)
-        large_order_repayment_amount_daily = sum(float(row.get("large_order_repayment_amount_daily", 0) or 0) for row in rows)
-
-        return {
-            "record_date": self.SUMMARY_LABEL,
-            "account_manager_name": "",
-            "cycle_target": cycle_target,
-            "repayment_amount_cumulative": repayment_amount_cumulative,
-            "loan_amount_cumulative": loan_amount_cumulative,
-            "repayment_amount_daily": repayment_amount_daily,
-            "target_progress": ratio_or_none(repayment_amount_cumulative, cycle_target),
-            "loan_amount_daily": loan_amount_daily,
-            "intention_daily": intention_daily,
-            "wechat_count_daily": wechat_count_daily,
-            "visit_count_daily": visit_count_daily,
-            "invitation_cumulative": invitation_cumulative,
-            "invalid_visit_count_daily": invalid_visit_count_daily,
-            "four_star_customer_count_daily": four_star_customer_count_daily,
-            "five_star_customer_count_daily": five_star_customer_count_daily,
-            "signing_count_daily": signing_count_daily,
-            "signing_count_cumulative": signing_count_cumulative,
-            "daily_signing_rate": ratio_or_none(signing_count_daily, visit_count_daily - invalid_visit_count_daily),
-            "quality_visit_count_daily": quality_visit_count_daily,
-            "daily_quality_visit_rate": ratio_or_none(quality_visit_count_daily, visit_count_daily),
-            "quality_visit_count_cumulative": quality_visit_count_cumulative,
-            "approval_customer_count_daily": approval_customer_count_daily,
-            "daily_approval_rate": ratio_or_none(approval_customer_count_daily, signing_count_daily),
-            "repayment_customer_count_daily": repayment_customer_count_daily,
-            "daily_sales_conversion_rate": ratio_or_none(signing_count_daily, visit_count_daily),
-            "warrant_conversion_rate": ratio_or_none(repayment_customer_count_daily, signing_count_daily),
-            "debt_case_submit_count_daily": debt_case_submit_count_daily,
-            "debt_case_repayment_count_daily": debt_case_repayment_count_daily,
-            "debt_case_repayment_amount_daily": debt_case_repayment_amount_daily,
-            "large_order_repayment_count_daily": large_order_repayment_count_daily,
-            "large_order_repayment_amount_daily": large_order_repayment_amount_daily,
-            "is_summary_row": True,
-        }
+        return self.record_service.build_today_display_summary_row(
+            rows,
+            record_date,
+            summary_label=self.SUMMARY_LABEL,
+        )
 
     def _apply_summary_row_style(self, row_index: int) -> None:
         bg = QColor("#7A111A")
@@ -401,7 +383,7 @@ class PreviewTab(QWidget):
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
-                field_key = self.FIELD_KEYS[col_idx]
+                field_key = self.field_keys[col_idx]
                 row_styles.append(self._build_export_cell_style(field_key, row, target_alerts, star_alerts))
                 if field_key == "account_manager_name":
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -455,8 +437,9 @@ class PreviewTab(QWidget):
                 region=region,
                 team_name=team_name,
                 team_manager_name=team_manager_name,
-                headers=self.HEADERS,
+                headers=self.headers,
                 rows=self._current_render_rows,
+                field_keys=self.field_keys,
                 cell_styles=self._current_cell_styles,
                 alert_summary=self._current_alert_summary,
             )

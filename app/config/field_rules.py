@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Tuple
+
 from app.config.field_registry import (
     AGGREGATION_DERIVED,
     AGGREGATION_LATEST,
@@ -27,17 +29,17 @@ from app.config.field_registry import (
 )
 
 
-LEGACY_DAILY_INT_FIELD_KEYS: tuple[str, ...] = daily_int_field_keys(include_future=False)
-LEGACY_DAILY_AMOUNT_FIELD_KEYS: tuple[str, ...] = daily_amount_field_keys(include_future=False)
-LEGACY_DAILY_METRIC_FIELD_KEYS: tuple[str, ...] = daily_metric_field_keys(include_future=False)
+LEGACY_DAILY_INT_FIELD_KEYS: Tuple[str, ...] = daily_int_field_keys(include_future=False)
+LEGACY_DAILY_AMOUNT_FIELD_KEYS: Tuple[str, ...] = daily_amount_field_keys(include_future=False)
+LEGACY_DAILY_METRIC_FIELD_KEYS: Tuple[str, ...] = daily_metric_field_keys(include_future=False)
 
-CONFIGURED_DAILY_INT_FIELD_KEYS: tuple[str, ...] = daily_int_field_keys(include_future=True)
-CONFIGURED_DAILY_AMOUNT_FIELD_KEYS: tuple[str, ...] = daily_amount_field_keys(include_future=True)
-CONFIGURED_DAILY_METRIC_FIELD_KEYS: tuple[str, ...] = daily_metric_field_keys(include_future=True)
+CONFIGURED_DAILY_INT_FIELD_KEYS: Tuple[str, ...] = daily_int_field_keys(include_future=True)
+CONFIGURED_DAILY_AMOUNT_FIELD_KEYS: Tuple[str, ...] = daily_amount_field_keys(include_future=True)
+CONFIGURED_DAILY_METRIC_FIELD_KEYS: Tuple[str, ...] = daily_metric_field_keys(include_future=True)
 
-CONFIGURED_JSON_EXPORT_FIELD_KEYS: tuple[str, ...] = export_field_keys("json", include_future=True)
-CONFIGURED_EXCEL_EXPORT_FIELD_KEYS: tuple[str, ...] = export_field_keys("excel", include_future=True)
-CONFIGURED_PNG_EXPORT_FIELD_KEYS: tuple[str, ...] = export_field_keys("png", include_future=True)
+CONFIGURED_JSON_EXPORT_FIELD_KEYS: Tuple[str, ...] = export_field_keys("json", include_future=True)
+CONFIGURED_EXCEL_EXPORT_FIELD_KEYS: Tuple[str, ...] = export_field_keys("excel", include_future=True)
+CONFIGURED_PNG_EXPORT_FIELD_KEYS: Tuple[str, ...] = export_field_keys("png", include_future=True)
 
 
 def get_data_type(field_key: str) -> str:
@@ -68,7 +70,7 @@ def is_analyzable_field(field_key: str) -> bool:
     return bool(get_field_spec(field_key).analyzable)
 
 
-def get_chart_supported(field_key: str) -> tuple[str, ...]:
+def get_chart_supported(field_key: str) -> Tuple[str, ...]:
     return tuple(get_field_spec(field_key).chart_supported)
 
 
@@ -80,11 +82,11 @@ def is_future_field(field_key: str) -> bool:
     return bool(get_field_spec(field_key).is_future_field)
 
 
-def configured_daily_metric_specs(*, include_future: bool = True) -> tuple[FieldSpec, ...]:
+def configured_daily_metric_specs(*, include_future: bool = True) -> Tuple[FieldSpec, ...]:
     return daily_metric_field_specs(include_future=include_future)
 
 
-def configured_template_fields(*, include_future: bool = True) -> tuple[FieldSpec, ...]:
+def configured_template_fields(*, include_future: bool = True) -> Tuple[FieldSpec, ...]:
     return template_field_specs(include_future=include_future)
 
 

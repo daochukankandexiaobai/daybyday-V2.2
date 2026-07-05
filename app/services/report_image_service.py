@@ -1,11 +1,14 @@
 ﻿from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
 from app.config.field_profiles import PNG_SECTION_PROFILES, PROFILE_PREVIEW_TABLE, get_profile_field_keys
+from app.db.database import DatabaseManager
+from app.fields.registry import PAGE_PNG_TODAY
 from app.utils.qt_compat import QRect, Qt
 from app.utils.qt_compat import QColor, QFont, QFontMetrics, QImage, QPainter, QPen
 
@@ -44,13 +47,32 @@ def _build_image_section_specs() -> tuple[ImageSectionSpec, ...]:
     return tuple(specs)
 
 
+def _ensure_identity_fields(field_keys: list[str]) -> list[str]:
+    result: list[str] = []
+    for key in ["record_date", "account_manager_name"]:
+        if key not in field_keys:
+            result.append(key)
+    for key in field_keys:
+        if key not in result:
+            result.append(key)
+    return result
+
+
+def _safe_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
 class ReportImageService:
     """今日展示图片导出服务：4张分图 + 1张纵向总图。"""
 
     SECTION_SPECS: tuple[ImageSectionSpec, ...] = _build_image_section_specs()
 
-    def __init__(self) -> None:
+    def __init__(self, db_manager=None) -> None:
         self.logger = get_logger("report_image_service")
+        self.db_manager = db_manager
         self.logo_image = self._load_logo()
 
     @staticmethod
@@ -85,6 +107,7 @@ class ReportImageService:
         team_manager_name: str,
         headers: Sequence[str],
         rows: Sequence[Sequence[str]],
+        field_keys: Sequence[str] | None = None,
         cell_styles: Sequence[Sequence[dict]] | None = None,
         alert_summary: Sequence[str] | None = None,
     ) -> dict[str, str | list[str]]:
@@ -95,7 +118,7 @@ class ReportImageService:
 
         part_paths: list[str] = []
         part_images: list[QImage] = []
-        for spec in self.SECTION_SPECS:
+        for spec in self._resolve_today_section_specs(field_keys):
             section_headers, section_rows, section_styles = self._slice_rows(
                 headers,
                 rows,
@@ -138,6 +161,105 @@ class ReportImageService:
             "total_path": str(total_path),
             "part_paths": part_paths,
         }
+
+    def _resolve_today_section_specs(self, field_keys: Sequence[str] | None = None) -> tuple[ImageSectionSpec, ...]:
+        source_field_keys = tuple(field_keys or _PREVIEW_FIELD_KEYS)
+        field_indexes = {str(field_key): idx for idx, field_key in enumerate(source_field_keys)}
+        template_sections = self._load_png_template_sections()
+        if template_sections:
+            specs = self._section_specs_from_template(template_sections, field_indexes)
+            if specs:
+                return specs
+            self.logger.warning("PNG模板未生成有效分图，使用默认PNG模板")
+        return self._default_section_specs(field_indexes)
+
+    def _load_png_template_sections(self) -> list[dict]:
+        db_manager = self.db_manager
+        if db_manager is None:
+            try:
+                db_manager = DatabaseManager()
+            except Exception:  # noqa: BLE001
+                return []
+
+        try:
+            with db_manager.get_connection() as conn:
+                row = conn.execute(
+                    """
+                    SELECT config_json
+                    FROM view_templates
+                    WHERE template_key = ?
+                      AND page_key = ?
+                      AND enabled = 1
+                    ORDER BY is_default DESC, id ASC
+                    LIMIT 1
+                    """,
+                    ("png_today_default", PAGE_PNG_TODAY),
+                ).fetchone()
+                if row is None:
+                    return []
+                payload = json.loads(str(row["config_json"] or "{}"))
+                sections = payload.get("sections", [])
+                if not isinstance(sections, list):
+                    return []
+                return [section for section in sections if isinstance(section, dict)]
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning("读取PNG字段模板失败，使用默认模板: %s", exc)
+            return []
+
+    def _section_specs_from_template(
+        self,
+        sections: Sequence[dict],
+        field_indexes: dict[str, int],
+    ) -> tuple[ImageSectionSpec, ...]:
+        specs: list[ImageSectionSpec] = []
+        for fallback_index, section in enumerate(sections, start=1):
+            raw_field_keys = section.get("field_keys", [])
+            if not isinstance(raw_field_keys, list):
+                continue
+            field_keys = _ensure_identity_fields([str(item) for item in raw_field_keys if str(item).strip()])
+            missing_keys = [key for key in field_keys if key not in field_indexes]
+            for field_key in missing_keys:
+                self.logger.warning(
+                    "PNG模板字段不存在或当前页面未显示，已跳过 section=%s field=%s",
+                    section.get("key") or section.get("title") or fallback_index,
+                    field_key,
+                )
+            column_indexes = tuple(field_indexes[key] for key in field_keys if key in field_indexes)
+            if not column_indexes:
+                self.logger.warning(
+                    "PNG模板分图无有效字段，已跳过 section=%s",
+                    section.get("key") or section.get("title") or fallback_index,
+                )
+                continue
+            specs.append(
+                ImageSectionSpec(
+                    index=_safe_int(section.get("index"), fallback_index),
+                    title=str(section.get("title") or "今日展示分图"),
+                    file_suffix=str(section.get("file_suffix") or section.get("key") or "分图"),
+                    column_indexes=column_indexes,
+                )
+            )
+        return tuple(sorted(specs, key=lambda item: item.index))
+
+    @staticmethod
+    def _default_section_specs(field_indexes: dict[str, int]) -> tuple[ImageSectionSpec, ...]:
+        specs: list[ImageSectionSpec] = []
+        for profile in PNG_SECTION_PROFILES:
+            field_keys = _ensure_identity_fields(list(profile.field_keys))
+            column_indexes = tuple(
+                field_indexes[field_key]
+                for field_key in field_keys
+                if field_key in field_indexes
+            )
+            specs.append(
+                ImageSectionSpec(
+                    index=profile.index,
+                    title=profile.title,
+                    file_suffix=profile.file_suffix,
+                    column_indexes=column_indexes,
+                )
+            )
+        return tuple(specs)
 
     def export_query_summary_bundle(
         self,

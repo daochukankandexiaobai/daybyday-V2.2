@@ -4,6 +4,8 @@ import uuid
 from datetime import datetime
 
 from app.config.field_rules import CONFIGURED_JSON_EXPORT_FIELD_KEYS
+from app.fields.display_config_service import DisplayFieldConfigService
+from app.fields.registry import PAGE_JSON_EXPORT
 from app.utils.date_utils import cycle_week_for_date, parse_date, settlement_cycle_display_code, settlement_cycle_for_date
 from app.utils.file_utils import ensure_dir, sanitize_component
 from app.utils.json_utils import save_json_file
@@ -29,6 +31,8 @@ class ExportService:
         self.template_service = template_service
         self.target_alert_service = target_alert_service
         self.star_customer_alert_service = star_customer_alert_service
+        self.field_value_service = getattr(record_service, "field_value_service", None)
+        self.display_config_service = DisplayFieldConfigService(record_service.record_repo.db)
 
     def export_json(
         self,
@@ -71,6 +75,7 @@ class ExportService:
             cross_cycle=bool(dataset["cross_cycle"]),
         )
 
+        export_field_defs = self._json_export_field_definitions()
         payload = {
             "metadata": {
                 "app_name": "TeamReportApp",
@@ -95,7 +100,7 @@ class ExportService:
                 "cross_cycle": bool(dataset["cross_cycle"]),
                 "cycle_codes_in_range": dataset["cycle_codes"],
             },
-            "records": [self._record_for_export(item) for item in rows],
+            "records": [self._record_for_export(item, export_field_defs) for item in rows],
             "summary": dataset["summary"],
             "alert_summary": alert_payload.get("alert_summary", {}),
             "alert_extensions": alert_payload.get("alert_extensions", []),
@@ -276,9 +281,52 @@ class ExportService:
             )
         return result
 
-    @staticmethod
-    def _record_for_export(record: dict) -> dict:
-        payload = {key: record.get(key) for key in CONFIGURED_JSON_EXPORT_FIELD_KEYS}
+    def _json_export_field_definitions(self) -> list[dict]:
+        rows = self.display_config_service.get_page_fields_with_fallback_keys(
+            page_key=PAGE_JSON_EXPORT,
+            fallback_field_keys=CONFIGURED_JSON_EXPORT_FIELD_KEYS,
+        )
+        seen = {str(row.get("field_key", "")) for row in rows}
+        try:
+            with self.record_service.record_repo.db.get_connection() as conn:
+                dynamic_rows = [
+                    dict(row)
+                    for row in conn.execute(
+                        """
+                        SELECT *
+                        FROM field_definitions
+                        WHERE enabled = 1
+                          AND category = 'raw_daily'
+                          AND storage_type = 'dynamic_metric'
+                        ORDER BY id ASC
+                        """
+                    ).fetchall()
+                ]
+        except Exception:  # noqa: BLE001
+            dynamic_rows = []
+        for row in dynamic_rows:
+            field_key = str(row.get("field_key", ""))
+            if field_key and field_key not in seen:
+                rows.append(row)
+                seen.add(field_key)
+        return rows
+
+    def _record_for_export(self, record: dict, field_defs: list[dict]) -> dict:
+        payload = {}
+        for field_def in field_defs:
+            field_key = str(field_def.get("field_key", ""))
+            if not field_key:
+                continue
+            storage_type = str(field_def.get("storage_type") or "")
+            storage_column = str(field_def.get("storage_column") or field_key)
+            if storage_type == "dynamic_metric" and self.field_value_service is not None:
+                try:
+                    payload[field_key] = self.field_value_service.get_value(record, field_key)
+                    continue
+                except Exception:  # noqa: BLE001
+                    pass
+            payload[field_key] = record.get(storage_column, record.get(field_key))
+
         record_date = str(payload.get("record_date", "") or "").strip()
         if record_date:
             payload["settlement_cycle_code"] = settlement_cycle_display_code(record_date=record_date)

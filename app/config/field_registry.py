@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple
+
+
+CATEGORY_RAW_DAILY = "raw_daily"
+CATEGORY_CONFIG = "config"
+CATEGORY_CUMULATIVE = "cumulative"
+CATEGORY_FORMULA = "formula"
+CATEGORY_DISPLAY = "display"
 
 
 DATA_TYPE_TEXT = "text"
@@ -22,14 +29,91 @@ AGGREGATION_SUM = "sum"
 AGGREGATION_LATEST = "latest"
 AGGREGATION_DERIVED = "derived"
 
+STORAGE_FIXED_COLUMN = "fixed_column"
+STORAGE_DYNAMIC_METRIC = "dynamic_metric"
+STORAGE_COMPUTED = "computed"
+STORAGE_DISPLAY_ONLY = "display_only"
+
 GROUP_SYSTEM = "system"
 GROUP_CONTEXT = "context"
+GROUP_IDENTITY = "identity"
 GROUP_CORE_PROGRESS = "core_progress"
 GROUP_PROCESS_BEHAVIOR = "process_behavior"
 GROUP_CONVERSION = "conversion"
 GROUP_SPECIAL_BUSINESS = "special_business"
+GROUP_DEBT_BIG_ORDER = "debt_big_order"
+GROUP_TARGET = "target"
 GROUP_REMARK = "remark"
 GROUP_DERIVED = "derived"
+GROUP_OTHER = "other"
+
+
+_GROUP_KEY_ALIASES = {
+    GROUP_SYSTEM: GROUP_IDENTITY,
+    GROUP_CONTEXT: GROUP_IDENTITY,
+    GROUP_SPECIAL_BUSINESS: GROUP_DEBT_BIG_ORDER,
+    GROUP_REMARK: GROUP_OTHER,
+    GROUP_DERIVED: GROUP_OTHER,
+}
+
+_CUMULATIVE_FIELD_KEYS = {
+    "repayment_amount_cumulative",
+    "loan_amount_cumulative",
+    "invitation_cumulative",
+    "signing_count_cumulative",
+    "quality_visit_count_cumulative",
+}
+
+_FORMULA_FIELD_KEYS = {
+    "target_progress",
+    "daily_signing_rate",
+    "daily_quality_visit_rate",
+    "daily_approval_rate",
+    "daily_sales_conversion_rate",
+    "signing_rate",
+    "quality_visit_rate",
+    "approval_rate",
+    "repayment_conversion_rate",
+    "sales_conversion_rate",
+    "warrant_conversion_rate",
+}
+
+_FIXED_DAILY_RECORD_FIELD_KEYS = {
+    "record_id",
+    "record_date",
+    "region",
+    "team_id",
+    "team_name_snapshot",
+    "team_manager_name_snapshot",
+    "account_manager_id",
+    "account_manager_name_snapshot",
+    "settlement_cycle_code",
+    "repayment_amount_daily",
+    "loan_amount_daily",
+    "intention_daily",
+    "wechat_count_daily",
+    "visit_count_daily",
+    "invalid_visit_count_daily",
+    "signing_count_daily",
+    "quality_visit_count_daily",
+    "approval_customer_count_daily",
+    "repayment_customer_count_daily",
+    "debt_case_submit_count_daily",
+    "debt_case_repayment_count_daily",
+    "debt_case_repayment_amount_daily",
+    "large_order_repayment_count_daily",
+    "large_order_repayment_amount_daily",
+    "four_star_customer_count_daily",
+    "five_star_customer_count_daily",
+    "remark",
+    "version",
+    "created_at",
+    "updated_at",
+    "template_version",
+    "record_hash",
+    "source_type",
+    "source_file",
+}
 
 
 @dataclass(frozen=True)
@@ -37,6 +121,7 @@ class FieldSpec:
     key: str
     label: str
     data_type: str
+    category: str = CATEGORY_DISPLAY
     default: Any = ""
     editable: bool = False
     aggregatable: bool = False
@@ -54,8 +139,13 @@ class FieldSpec:
     excel_export: bool = False
     png_export: bool = False
     include_in_hash: bool = False
-    chart_supported: tuple[str, ...] = ()
-    aliases: tuple[str, ...] = ()
+    chart_supported: Tuple[str, ...] = ()
+    aliases: Tuple[str, ...] = ()
+    formula_id: str = ""
+    enabled: bool = True
+    system_field: bool = False
+    storage_type: str = STORAGE_DISPLAY_ONLY
+    storage_column: str = ""
     is_raw_daily_metric: bool = False
     is_future_field: bool = False
     note: str = ""
@@ -64,18 +154,114 @@ class FieldSpec:
     def resolved_template_key(self) -> str:
         return self.template_key or self.key
 
+    @property
+    def field_key(self) -> str:
+        return self.key
+
+    @property
+    def group_key(self) -> str:
+        return _GROUP_KEY_ALIASES.get(self.group, self.group)
+
+    @property
+    def required(self) -> bool:
+        return self.template_required
+
+    @property
+    def default_value(self) -> Any:
+        return self.default
+
+    @property
+    def visible_in_entry(self) -> bool:
+        return self.order_entry > 0
+
+    @property
+    def visible_in_today_display(self) -> bool:
+        return self.order_today_display > 0
+
+    @property
+    def visible_in_query_summary(self) -> bool:
+        return self.order_query_summary > 0
+
+    @property
+    def visible_in_analysis(self) -> bool:
+        return self.order_analysis > 0
+
+    @property
+    def visible_in_json_export(self) -> bool:
+        return self.json_export
+
+    @property
+    def visible_in_excel_export(self) -> bool:
+        return self.excel_export
+
+    @property
+    def visible_in_png_export(self) -> bool:
+        return self.png_export
+
+    @property
+    def order_entry(self) -> int:
+        return _field_order_for_profile("entry_input", self.key)
+
+    @property
+    def order_today_display(self) -> int:
+        return _field_order_for_profile("preview_table", self.key)
+
+    @property
+    def order_query_summary(self) -> int:
+        return _field_order_for_profile("query_summary_table", self.key)
+
+    @property
+    def order_analysis(self) -> int:
+        return _field_order_for_profile("analysis_metrics", self.key)
+
+    @property
+    def order_png(self) -> int:
+        return _field_order_for_png_sections(self.key)
+
+
+FieldDefinition = FieldSpec
+
+
+def _infer_category(
+    key: str,
+    data_type: str,
+    group: str,
+    aggregation: str,
+    is_raw_daily_metric: bool,
+) -> str:
+    if is_raw_daily_metric or key == "remark":
+        return CATEGORY_RAW_DAILY
+    if group == GROUP_TARGET:
+        return CATEGORY_CONFIG
+    if key in _CUMULATIVE_FIELD_KEYS:
+        return CATEGORY_CUMULATIVE
+    if key in _FORMULA_FIELD_KEYS or aggregation == AGGREGATION_DERIVED or data_type == DATA_TYPE_PERCENT:
+        return CATEGORY_FORMULA
+    return CATEGORY_DISPLAY
+
+
+def _infer_storage_type(key: str, category: str, aggregation: str, db_ddl: str) -> str:
+    if key in _FIXED_DAILY_RECORD_FIELD_KEYS or db_ddl:
+        return STORAGE_FIXED_COLUMN
+    if category == CATEGORY_RAW_DAILY:
+        return STORAGE_DYNAMIC_METRIC
+    if category in {CATEGORY_CUMULATIVE, CATEGORY_FORMULA} or aggregation == AGGREGATION_DERIVED:
+        return STORAGE_COMPUTED
+    return STORAGE_DISPLAY_ONLY
+
 
 def _field(
     key: str,
     label: str,
     data_type: str,
     *,
+    category: str = "",
     default: Any = "",
     editable: bool = False,
     aggregatable: bool = False,
     analyzable: bool = False,
     group: str = GROUP_CONTEXT,
-    format_type: str | None = None,
+    format_type: Optional[str] = None,
     aggregation: str = AGGREGATION_NONE,
     db_ddl: str = "",
     template_field: bool = False,
@@ -86,8 +272,13 @@ def _field(
     excel_export: bool = False,
     png_export: bool = False,
     include_in_hash: bool = False,
-    chart_supported: tuple[str, ...] = (),
-    aliases: tuple[str, ...] = (),
+    chart_supported: Tuple[str, ...] = (),
+    aliases: Tuple[str, ...] = (),
+    formula_id: str = "",
+    enabled: bool = True,
+    system_field: bool = False,
+    storage_type: str = "",
+    storage_column: str = "",
     is_raw_daily_metric: bool = False,
     is_future_field: bool = False,
     note: str = "",
@@ -99,11 +290,18 @@ def _field(
             DATA_TYPE_PERCENT: FORMAT_PERCENT,
             DATA_TYPE_DATE: FORMAT_DATE,
         }.get(data_type, FORMAT_TEXT)
+    if not category:
+        category = _infer_category(key, data_type, group, aggregation, is_raw_daily_metric)
+    if not storage_type:
+        storage_type = _infer_storage_type(key, category, aggregation, db_ddl)
+    if not storage_column and storage_type == STORAGE_FIXED_COLUMN:
+        storage_column = key
 
     return FieldSpec(
         key=key,
         label=label,
         data_type=data_type,
+        category=category,
         default=default,
         editable=editable,
         aggregatable=aggregatable,
@@ -123,13 +321,18 @@ def _field(
         include_in_hash=include_in_hash,
         chart_supported=chart_supported,
         aliases=aliases,
+        formula_id=formula_id,
+        enabled=enabled,
+        system_field=system_field or group == GROUP_SYSTEM,
+        storage_type=storage_type,
+        storage_column=storage_column,
         is_raw_daily_metric=is_raw_daily_metric,
         is_future_field=is_future_field,
         note=note,
     )
 
 
-CONTEXT_FIELD_SPECS: tuple[FieldSpec, ...] = (
+CONTEXT_FIELD_SPECS: Tuple[FieldSpec, ...] = (
     _field("record_id", "记录ID", DATA_TYPE_TEXT, group=GROUP_SYSTEM, json_export=True, excel_export=True),
     _field(
         "record_date",
@@ -223,7 +426,7 @@ CONTEXT_FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-DAILY_METRIC_FIELD_SPECS: tuple[FieldSpec, ...] = (
+DAILY_METRIC_FIELD_SPECS: Tuple[FieldSpec, ...] = (
     _field(
         "repayment_amount_daily",
         "当日回款金额",
@@ -571,7 +774,7 @@ DAILY_METRIC_FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-REMARK_FIELD_SPECS: tuple[FieldSpec, ...] = (
+REMARK_FIELD_SPECS: Tuple[FieldSpec, ...] = (
     _field(
         "remark",
         "备注",
@@ -589,7 +792,7 @@ REMARK_FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-SYSTEM_FIELD_SPECS: tuple[FieldSpec, ...] = (
+SYSTEM_FIELD_SPECS: Tuple[FieldSpec, ...] = (
     _field("version", "版本", DATA_TYPE_INT, default=1, group=GROUP_SYSTEM, json_export=True, excel_export=True),
     _field("created_at", "创建时间", DATA_TYPE_TEXT, group=GROUP_SYSTEM, json_export=True),
     _field("updated_at", "更新时间", DATA_TYPE_TEXT, group=GROUP_SYSTEM, json_export=True, excel_export=True),
@@ -600,7 +803,47 @@ SYSTEM_FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-DISPLAY_FIELD_SPECS: tuple[FieldSpec, ...] = (
+TARGET_FIELD_SPECS: Tuple[FieldSpec, ...] = (
+    _field(
+        "visit_target",
+        "周上门目标",
+        DATA_TYPE_INT,
+        category=CATEGORY_CONFIG,
+        default=0,
+        group=GROUP_TARGET,
+        aggregation=AGGREGATION_LATEST,
+    ),
+    _field(
+        "quality_visit_target",
+        "周优质上门目标",
+        DATA_TYPE_INT,
+        category=CATEGORY_CONFIG,
+        default=0,
+        group=GROUP_TARGET,
+        aggregation=AGGREGATION_LATEST,
+    ),
+    _field(
+        "repayment_target",
+        "周回款目标",
+        DATA_TYPE_AMOUNT,
+        category=CATEGORY_CONFIG,
+        default=0.0,
+        group=GROUP_TARGET,
+        aggregation=AGGREGATION_LATEST,
+    ),
+    _field(
+        "cycle_repayment_target",
+        "月度/结算周期回款目标",
+        DATA_TYPE_AMOUNT,
+        category=CATEGORY_CONFIG,
+        default=0.0,
+        group=GROUP_TARGET,
+        aggregation=AGGREGATION_SUM,
+    ),
+)
+
+
+DISPLAY_FIELD_SPECS: Tuple[FieldSpec, ...] = (
     _field("query_range", "查询区间", DATA_TYPE_TEXT, group=GROUP_DERIVED, format_type=FORMAT_TEXT, aggregation=AGGREGATION_NONE),
     _field("team_name", "团队", DATA_TYPE_TEXT, group=GROUP_CONTEXT, format_type=FORMAT_TEXT, aggregation=AGGREGATION_NONE),
     _field("account_manager_name", "客户经理", DATA_TYPE_TEXT, group=GROUP_CONTEXT, format_type=FORMAT_TEXT, aggregation=AGGREGATION_NONE),
@@ -669,26 +912,152 @@ DISPLAY_FIELD_SPECS: tuple[FieldSpec, ...] = (
 )
 
 
-FIELD_SPECS: tuple[FieldSpec, ...] = (
+FIELD_SPECS: Tuple[FieldSpec, ...] = (
     CONTEXT_FIELD_SPECS
     + DAILY_METRIC_FIELD_SPECS
     + REMARK_FIELD_SPECS
     + SYSTEM_FIELD_SPECS
+    + TARGET_FIELD_SPECS
     + DISPLAY_FIELD_SPECS
 )
 
-FIELD_REGISTRY: dict[str, FieldSpec] = {spec.key: spec for spec in FIELD_SPECS}
+FIELD_REGISTRY: Dict[str, FieldSpec] = {spec.key: spec for spec in FIELD_SPECS}
+
+
+def _field_order_for_profile(profile_key: str, field_key: str) -> int:
+    try:
+        from app.config.field_profiles import get_profile_field_keys
+
+        keys = list(get_profile_field_keys(profile_key))
+    except Exception:
+        return 0
+    try:
+        return keys.index(field_key) + 1
+    except ValueError:
+        return 0
+
+
+def _field_order_for_png_sections(field_key: str) -> int:
+    try:
+        from app.config.field_profiles import PNG_SECTION_PROFILES
+
+        ordered_keys = []
+        for section in sorted(PNG_SECTION_PROFILES, key=lambda item: item.index):
+            ordered_keys.extend(section.field_keys)
+    except Exception:
+        return 0
+    try:
+        return ordered_keys.index(field_key) + 1
+    except ValueError:
+        return 0
 
 
 def get_field_spec(key: str) -> FieldSpec:
     return FIELD_REGISTRY[key]
 
 
+def get_field(field_key: str) -> Optional[FieldSpec]:
+    return FIELD_REGISTRY.get(field_key)
+
+
 def has_field(key: str) -> bool:
     return key in FIELD_REGISTRY
 
 
-def iter_field_specs(*, include_future: bool = True, include_display: bool = True) -> tuple[FieldSpec, ...]:
+def is_field_known(field_key: str) -> bool:
+    return has_field(field_key)
+
+
+def get_all_fields() -> Tuple[FieldSpec, ...]:
+    return iter_field_specs(include_future=True, include_display=True)
+
+
+def _fields_for_keys(field_keys: Tuple[str, ...]) -> Tuple[FieldSpec, ...]:
+    fields = []
+    for key in field_keys:
+        spec = get_field(key)
+        if spec is not None and spec.enabled:
+            fields.append(spec)
+    return tuple(fields)
+
+
+def get_entry_fields() -> Tuple[FieldSpec, ...]:
+    from app.config.field_profiles import PROFILE_ENTRY_INPUT, get_profile_field_keys
+
+    return _fields_for_keys(get_profile_field_keys(PROFILE_ENTRY_INPUT))
+
+
+def get_today_display_fields() -> Tuple[FieldSpec, ...]:
+    from app.config.field_profiles import PROFILE_PREVIEW_TABLE, get_profile_field_keys
+
+    return _fields_for_keys(get_profile_field_keys(PROFILE_PREVIEW_TABLE))
+
+
+def get_query_summary_fields() -> Tuple[FieldSpec, ...]:
+    from app.config.field_profiles import PROFILE_QUERY_SUMMARY_TABLE, get_profile_field_keys
+
+    return _fields_for_keys(get_profile_field_keys(PROFILE_QUERY_SUMMARY_TABLE))
+
+
+def get_analysis_fields() -> Tuple[FieldSpec, ...]:
+    from app.config.field_profiles import PROFILE_ANALYSIS_METRICS, get_profile_field_keys
+
+    return _fields_for_keys(get_profile_field_keys(PROFILE_ANALYSIS_METRICS))
+
+
+def get_png_export_fields() -> Tuple[FieldSpec, ...]:
+    return _fields_for_keys(export_field_keys("png", include_future=True))
+
+
+def get_fields_for_page(page_key: str) -> Tuple[FieldSpec, ...]:
+    normalized = str(page_key or "").strip().lower()
+    aliases = {
+        "entry": "entry",
+        "data_entry": "entry",
+        "data-entry": "entry",
+        "数据录入": "entry",
+        "today": "today_display",
+        "today_display": "today_display",
+        "preview": "today_display",
+        "今日展示": "today_display",
+        "query": "query_summary",
+        "query_summary": "query_summary",
+        "summary": "query_summary",
+        "查询汇总": "query_summary",
+        "analysis": "analysis",
+        "数据分析": "analysis",
+        "json_export": "json_export",
+        "excel_export": "excel_export",
+        "png_export": "png_export",
+    }
+    canonical = aliases.get(normalized, normalized)
+    if canonical == "entry":
+        return get_entry_fields()
+    if canonical == "today_display":
+        return get_today_display_fields()
+    if canonical == "query_summary":
+        return get_query_summary_fields()
+    if canonical == "analysis":
+        return get_analysis_fields()
+    if canonical == "json_export":
+        return _fields_for_keys(export_field_keys("json", include_future=True))
+    if canonical == "excel_export":
+        return _fields_for_keys(export_field_keys("excel", include_future=True))
+    if canonical == "png_export":
+        return get_png_export_fields()
+    return ()
+
+
+def get_fields_by_group(group_key: str) -> Tuple[FieldSpec, ...]:
+    normalized = str(group_key or "").strip()
+    fields = []
+    for spec in get_all_fields():
+        if spec.group == normalized or spec.group_key == normalized:
+            fields.append(spec)
+    return tuple(fields)
+
+
+def iter_field_specs(*, include_future: bool = True, include_display: bool = True) -> Tuple[FieldSpec, ...]:
     result = []
     display_keys = {spec.key for spec in DISPLAY_FIELD_SPECS}
     for spec in FIELD_SPECS:
@@ -700,7 +1069,7 @@ def iter_field_specs(*, include_future: bool = True, include_display: bool = Tru
     return tuple(result)
 
 
-def daily_metric_field_specs(*, include_future: bool = True) -> tuple[FieldSpec, ...]:
+def daily_metric_field_specs(*, include_future: bool = True) -> Tuple[FieldSpec, ...]:
     return tuple(
         spec
         for spec in DAILY_METRIC_FIELD_SPECS
@@ -708,7 +1077,7 @@ def daily_metric_field_specs(*, include_future: bool = True) -> tuple[FieldSpec,
     )
 
 
-def daily_int_field_keys(*, include_future: bool = True) -> tuple[str, ...]:
+def daily_int_field_keys(*, include_future: bool = True) -> Tuple[str, ...]:
     return tuple(
         spec.key
         for spec in daily_metric_field_specs(include_future=include_future)
@@ -716,7 +1085,7 @@ def daily_int_field_keys(*, include_future: bool = True) -> tuple[str, ...]:
     )
 
 
-def daily_amount_field_keys(*, include_future: bool = True) -> tuple[str, ...]:
+def daily_amount_field_keys(*, include_future: bool = True) -> Tuple[str, ...]:
     return tuple(
         spec.key
         for spec in daily_metric_field_specs(include_future=include_future)
@@ -724,11 +1093,11 @@ def daily_amount_field_keys(*, include_future: bool = True) -> tuple[str, ...]:
     )
 
 
-def daily_metric_field_keys(*, include_future: bool = True) -> tuple[str, ...]:
+def daily_metric_field_keys(*, include_future: bool = True) -> Tuple[str, ...]:
     return tuple(spec.key for spec in daily_metric_field_specs(include_future=include_future))
 
 
-def template_field_specs(*, include_future: bool = True) -> tuple[FieldSpec, ...]:
+def template_field_specs(*, include_future: bool = True) -> Tuple[FieldSpec, ...]:
     specs = [
         spec
         for spec in CONTEXT_FIELD_SPECS + DAILY_METRIC_FIELD_SPECS + REMARK_FIELD_SPECS
@@ -737,7 +1106,7 @@ def template_field_specs(*, include_future: bool = True) -> tuple[FieldSpec, ...
     return tuple(sorted(specs, key=lambda item: item.template_order))
 
 
-def export_field_keys(target: str, *, include_future: bool = True) -> tuple[str, ...]:
+def export_field_keys(target: str, *, include_future: bool = True) -> Tuple[str, ...]:
     attr_map = {
         "json": "json_export",
         "excel": "excel_export",

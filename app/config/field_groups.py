@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Dict, Tuple
 
 from app.config.field_registry import (
     GROUP_CONTEXT,
@@ -31,11 +32,11 @@ GROUP_PNG_SPECIAL_BUSINESS = "png_special_business"
 class FieldGroup:
     key: str
     label: str
-    field_keys: tuple[str, ...]
+    field_keys: Tuple[str, ...]
     description: str = ""
 
 
-ENTRY_INPUT_FIELD_KEYS: tuple[str, ...] = (
+ENTRY_INPUT_FIELD_KEYS: Tuple[str, ...] = (
     "account_manager_name",
     "repayment_amount_daily",
     "loan_amount_daily",
@@ -57,7 +58,7 @@ ENTRY_INPUT_FIELD_KEYS: tuple[str, ...] = (
     "remark",
 )
 
-PREVIEW_CORE_PROGRESS_FIELD_KEYS: tuple[str, ...] = (
+PREVIEW_CORE_PROGRESS_FIELD_KEYS: Tuple[str, ...] = (
     "record_date",
     "account_manager_name",
     "cycle_target",
@@ -68,7 +69,7 @@ PREVIEW_CORE_PROGRESS_FIELD_KEYS: tuple[str, ...] = (
     "loan_amount_daily",
 )
 
-PREVIEW_PROCESS_BEHAVIOR_FIELD_KEYS: tuple[str, ...] = (
+PREVIEW_PROCESS_BEHAVIOR_FIELD_KEYS: Tuple[str, ...] = (
     "record_date",
     "account_manager_name",
     "intention_daily",
@@ -80,7 +81,7 @@ PREVIEW_PROCESS_BEHAVIOR_FIELD_KEYS: tuple[str, ...] = (
     "five_star_customer_count_daily",
 )
 
-PREVIEW_CONVERSION_FIELD_KEYS: tuple[str, ...] = (
+PREVIEW_CONVERSION_FIELD_KEYS: Tuple[str, ...] = (
     "record_date",
     "account_manager_name",
     "signing_count_daily",
@@ -96,7 +97,7 @@ PREVIEW_CONVERSION_FIELD_KEYS: tuple[str, ...] = (
     "warrant_conversion_rate",
 )
 
-PREVIEW_SPECIAL_BUSINESS_FIELD_KEYS: tuple[str, ...] = (
+PREVIEW_SPECIAL_BUSINESS_FIELD_KEYS: Tuple[str, ...] = (
     "record_date",
     "account_manager_name",
     "debt_case_submit_count_daily",
@@ -106,7 +107,7 @@ PREVIEW_SPECIAL_BUSINESS_FIELD_KEYS: tuple[str, ...] = (
     "large_order_repayment_amount_daily",
 )
 
-QUERY_SUMMARY_FIELD_KEYS: tuple[str, ...] = (
+QUERY_SUMMARY_FIELD_KEYS: Tuple[str, ...] = (
     "query_range",
     "account_manager_name",
     "cycle_target",
@@ -140,7 +141,7 @@ QUERY_SUMMARY_FIELD_KEYS: tuple[str, ...] = (
     "large_order_repayment_amount",
 )
 
-EXCEL_RAW_RECORD_FIELD_KEYS: tuple[str, ...] = (
+EXCEL_RAW_RECORD_FIELD_KEYS: Tuple[str, ...] = (
     "record_id",
     "record_date",
     "region",
@@ -172,7 +173,7 @@ EXCEL_RAW_RECORD_FIELD_KEYS: tuple[str, ...] = (
     "source_type",
 )
 
-ANALYSIS_METRIC_FIELD_KEYS: tuple[str, ...] = (
+ANALYSIS_METRIC_FIELD_KEYS: Tuple[str, ...] = (
     "repayment_amount_daily",
     "loan_amount_daily",
     "visit_count_daily",
@@ -186,6 +187,8 @@ ANALYSIS_METRIC_FIELD_KEYS: tuple[str, ...] = (
     "signing_count",
     "quality_visit_count",
     "repayment_customer_count",
+    "four_star_customer_count",
+    "five_star_customer_count",
     "signing_rate",
     "quality_visit_rate",
     "sales_conversion_rate",
@@ -194,7 +197,7 @@ ANALYSIS_METRIC_FIELD_KEYS: tuple[str, ...] = (
 )
 
 
-FIELD_GROUPS: tuple[FieldGroup, ...] = (
+FIELD_GROUPS: Tuple[FieldGroup, ...] = (
     FieldGroup(GROUP_CONTEXT, "上下文字段", ("record_date", "region", "team_name_snapshot", "team_manager_name_snapshot", "account_manager_name_snapshot")),
     FieldGroup(GROUP_CORE_PROGRESS, "核心进度", ("repayment_amount_daily", "loan_amount_daily")),
     FieldGroup(
@@ -242,12 +245,12 @@ FIELD_GROUPS: tuple[FieldGroup, ...] = (
     FieldGroup(GROUP_PNG_SPECIAL_BUSINESS, "PNG 分图 - 债重与大单", PREVIEW_SPECIAL_BUSINESS_FIELD_KEYS),
 )
 
-FIELD_GROUP_MAP: dict[str, FieldGroup] = {group.key: group for group in FIELD_GROUPS}
+FIELD_GROUP_MAP: Dict[str, FieldGroup] = {group.key: group for group in FIELD_GROUPS}
 
 
 def get_field_group(group_key: str) -> FieldGroup:
     return FIELD_GROUP_MAP[group_key]
 
 
-def get_group_field_keys(group_key: str) -> tuple[str, ...]:
+def get_group_field_keys(group_key: str) -> Tuple[str, ...]:
     return get_field_group(group_key).field_keys

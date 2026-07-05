@@ -34,8 +34,8 @@ class QueryTab(QWidget):
     MODE_MONTH = "月报"
     MODE_CUSTOM = "自定义"
 
-    FIELD_KEYS = list(get_profile_field_keys(PROFILE_QUERY_SUMMARY_TABLE))
-    TABLE_HEADERS = [get_field_spec(key).label for key in FIELD_KEYS]
+    DEFAULT_FIELD_KEYS = list(get_profile_field_keys(PROFILE_QUERY_SUMMARY_TABLE))
+    DEFAULT_TABLE_HEADERS = [get_field_spec(key).label for key in DEFAULT_FIELD_KEYS]
 
     def __init__(
         self,
@@ -64,9 +64,38 @@ class QueryTab(QWidget):
         self._current_query_mode = ""
         self._current_query_start = ""
         self._current_query_end = ""
+        self.field_definitions = self._load_field_definitions()
+        self.field_keys = [str(row.get("field_key", "")) for row in self.field_definitions]
+        self.table_headers = [str(row.get("label", "")) for row in self.field_definitions]
+        self._field_def_map = {str(row.get("field_key", "")): row for row in self.field_definitions}
 
         self._build_ui()
         self.reload_teams()
+
+    def _load_field_definitions(self) -> list[dict]:
+        getter = getattr(self.record_service, "get_query_summary_field_definitions", None)
+        if callable(getter):
+            rows = getter()
+            if rows:
+                return rows
+        return [
+            {
+                "field_key": field_key,
+                "label": get_field_spec(field_key).label,
+                "data_type": get_field_spec(field_key).data_type,
+            }
+            for field_key in self.DEFAULT_FIELD_KEYS
+        ]
+
+    def reload_field_config(self) -> None:
+        self.field_definitions = self._load_field_definitions()
+        self.field_keys = [str(row.get("field_key", "")) for row in self.field_definitions]
+        self.table_headers = [str(row.get("label", "")) for row in self.field_definitions]
+        self._field_def_map = {str(row.get("field_key", "")): row for row in self.field_definitions}
+        self.table.clear()
+        self.table.setColumnCount(len(self.table_headers))
+        self.table.setHorizontalHeaderLabels(self.table_headers)
+        self.on_query()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -166,8 +195,8 @@ class QueryTab(QWidget):
         self.top_panel_layout.addWidget(self.range_info)
         self.top_panel_layout.addWidget(self.rule_info)
 
-        self.table = QTableWidget(0, len(self.TABLE_HEADERS))
-        self.table.setHorizontalHeaderLabels(self.TABLE_HEADERS)
+        self.table = QTableWidget(0, len(self.table_headers))
+        self.table.setHorizontalHeaderLabels(self.table_headers)
         self.table.setAlternatingRowColors(True)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -348,22 +377,28 @@ class QueryTab(QWidget):
                 continue
             self.summary_labels[key].setText(format_percent(value))
 
-    @staticmethod
-    def _format_field_value(field_key: str, row: dict) -> str:
+    def _field_data_type(self, field_key: str) -> str:
+        field_def = self._field_def_map.get(field_key, {})
+        data_type = str(field_def.get("data_type", "") or "")
+        if data_type:
+            return data_type
+        return get_field_spec(field_key).data_type
+
+    def _format_field_value(self, field_key: str, row: dict) -> str:
         value = row.get(field_key)
         if field_key == "cycle_target" and value is None:
             return ""
-        spec = get_field_spec(field_key)
-        if spec.data_type == DATA_TYPE_AMOUNT:
+        data_type = self._field_data_type(field_key)
+        if data_type == DATA_TYPE_AMOUNT:
             return format_money(value)
-        if spec.data_type == DATA_TYPE_INT:
+        if data_type == DATA_TYPE_INT:
             return format_int(value)
-        if spec.data_type == DATA_TYPE_PERCENT:
+        if data_type == DATA_TYPE_PERCENT:
             return format_percent(value)
         return str(value or "")
 
     def _build_table_values(self, row: dict) -> list[str]:
-        return [self._format_field_value(field_key, row) for field_key in self.FIELD_KEYS]
+        return [self._format_field_value(field_key, row) for field_key in self.field_keys]
 
     @staticmethod
     def _status_color(status_code: str) -> QColor | None:
@@ -547,7 +582,7 @@ class QueryTab(QWidget):
             row_styles: list[dict] = []
             for col_idx, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
-                field_key = self.FIELD_KEYS[col_idx]
+                field_key = self.field_keys[col_idx]
                 row_styles.append(self._build_export_cell_style(field_key, row, target_alerts, star_alerts))
                 if field_key in {"query_range", "account_manager_name"}:
                     item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -589,7 +624,7 @@ class QueryTab(QWidget):
                 mode=self._current_query_mode or self.mode_combo.currentText(),
                 start_date=self._current_query_start,
                 end_date=self._current_query_end,
-                headers=self.TABLE_HEADERS,
+                headers=self.table_headers,
                 rows=self._current_render_rows,
                 cell_styles=self._current_cell_styles,
                 alert_summary=self._current_alert_summary,

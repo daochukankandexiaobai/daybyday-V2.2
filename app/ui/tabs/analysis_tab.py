@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-from app.config.field_profiles import PROFILE_ANALYSIS_METRICS, get_profile_field_keys
-from app.config.field_registry import get_field_spec
-from app.config.field_rules import supports_chart
+from app.fields.analysis_config_service import ANALYSIS_TYPE_RANKING, ANALYSIS_TYPE_TREND
 from app.services.analytics_service import AnalyticsService
 from app.ui.layout_profile import LayoutProfile
 from app.ui.widgets.chart_widget import ChartWidget
@@ -289,13 +287,10 @@ class AnalysisTab(QWidget):
         layout.addWidget(self.trend_chart, 1)
         self.chart_tabs.addTab(trend_tab, "趋势")
 
-    @classmethod
-    def _trend_metric_options(cls) -> list[tuple[str, str]]:
+    def _trend_metric_options(self) -> list[tuple[str, str]]:
         options: list[tuple[str, str]] = []
-        for field_key in get_profile_field_keys(PROFILE_ANALYSIS_METRICS):
-            if not supports_chart(field_key, cls.TREND_CHART_KEY):
-                continue
-            label = cls._analysis_metric_label(field_key)
+        for label, field_key in self.analytics_service.get_analysis_metric_options(ANALYSIS_TYPE_TREND):
+            label = self._normalize_analysis_metric_label(label)
             options.append((f"{label}趋势", field_key))
 
         if not options:
@@ -303,11 +298,13 @@ class AnalysisTab(QWidget):
         return options
 
     @staticmethod
-    def _analysis_metric_label(field_key: str) -> str:
-        label = get_field_spec(field_key).label
+    def _normalize_analysis_metric_label(label: str) -> str:
         if label.startswith("当日"):
             label = label[2:]
         return label
+
+    def _analysis_metric_label(self, field_key: str) -> str:
+        return self._normalize_analysis_metric_label(self.analytics_service.get_metric_label(field_key))
 
     def _build_ranking_tab(self) -> None:
         ranking_tab = QWidget()
@@ -320,14 +317,7 @@ class AnalysisTab(QWidget):
         bar.setSpacing(6)
         bar.addWidget(QLabel("排行指标"))
         self.ranking_metric_combo = QComboBox()
-        for text, key in [
-            ("回款金额 Top N", "repayment_amount"),
-            ("签约量 Top N", "signing_count"),
-            ("上门量 Top N", "visit_count"),
-            ("优质上门量 Top N", "quality_visit_count"),
-            ("销售转化率 Top N", "sales_conversion_rate"),
-            ("权证转化率 Top N", "warrant_conversion_rate"),
-        ]:
+        for text, key in self._ranking_metric_options():
             self.ranking_metric_combo.addItem(text, key)
         bar.addWidget(self.ranking_metric_combo)
 
@@ -343,6 +333,41 @@ class AnalysisTab(QWidget):
         layout.addLayout(bar)
         layout.addWidget(self.ranking_chart, 1)
         self.chart_tabs.addTab(ranking_tab, "排行")
+
+    def _ranking_metric_options(self) -> list[tuple[str, str]]:
+        options: list[tuple[str, str]] = []
+        for label, field_key in self.analytics_service.get_analysis_metric_options(ANALYSIS_TYPE_RANKING):
+            label = self._normalize_analysis_metric_label(label)
+            options.append((f"{label} Top N", field_key))
+        if not options:
+            options.append(("回款金额 Top N", "repayment_amount"))
+        return options
+
+    def reload_field_config(self) -> None:
+        trend_current = str(self.trend_metric_combo.currentData() or "")
+        ranking_current = str(self.ranking_metric_combo.currentData() or "")
+
+        self.trend_metric_combo.blockSignals(True)
+        self.trend_metric_combo.clear()
+        trend_index = 0
+        for idx, (text, key) in enumerate(self._trend_metric_options()):
+            self.trend_metric_combo.addItem(text, key)
+            if key == trend_current:
+                trend_index = idx
+        self.trend_metric_combo.setCurrentIndex(trend_index)
+        self.trend_metric_combo.blockSignals(False)
+
+        self.ranking_metric_combo.blockSignals(True)
+        self.ranking_metric_combo.clear()
+        ranking_index = 0
+        for idx, (text, key) in enumerate(self._ranking_metric_options()):
+            self.ranking_metric_combo.addItem(text, key)
+            if key == ranking_current:
+                ranking_index = idx
+        self.ranking_metric_combo.setCurrentIndex(ranking_index)
+        self.ranking_metric_combo.blockSignals(False)
+
+        self.on_query()
 
     def _build_funnel_tab(self) -> None:
         funnel_tab = QWidget()
@@ -530,7 +555,7 @@ class AnalysisTab(QWidget):
 
         labels = [str(item.get("account_manager_name", "")) for item in ranking]
         values = [float(item.get("value", 0) or 0) for item in ranking]
-        as_percent = metric_key in {"sales_conversion_rate", "warrant_conversion_rate"}
+        as_percent = self.analytics_service.is_percent_metric(metric_key)
         title = f"{self.ranking_metric_combo.currentText()}（Top {len(ranking)}）"
         try:
             self.ranking_chart.plot_horizontal_bar(
