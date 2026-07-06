@@ -17,6 +17,7 @@ from app.services.field_admin_config_service import (
     CATEGORIES,
     DATA_TYPES,
 )
+from app.ui.tabs.config_pack_tab import ConfigPackTab
 from app.utils.qt_compat import Qt, Signal
 from app.utils.qt_compat import (
     QCheckBox,
@@ -59,9 +60,10 @@ PAGE_LABELS = [
 class FieldReportConfigTab(QWidget):
     config_changed = Signal()
 
-    def __init__(self, field_admin_config_service, operator_getter=None, parent=None) -> None:
+    def __init__(self, field_admin_config_service, config_pack_service=None, operator_getter=None, parent=None) -> None:
         super().__init__(parent)
         self.field_admin_config_service = field_admin_config_service
+        self.config_pack_service = config_pack_service
         self.operator_getter = operator_getter
         self._field_rows: List[Dict[str, Any]] = []
         self._page_rows: List[Dict[str, Any]] = []
@@ -102,7 +104,13 @@ class FieldReportConfigTab(QWidget):
         self.entry_config_tab = self._build_page_tab(PAGE_DATA_ENTRY)
         self.display_config_tab = self._build_page_tab(PAGE_TODAY_DISPLAY)
         self.png_config_tab = self._build_png_tab()
+        self.config_pack_tab = ConfigPackTab(
+            self.config_pack_service,
+            operator_getter=self.operator_getter,
+        ) if self.config_pack_service is not None else None
         self.tabs.addTab(self.overview_tab, "配置总览")
+        if self.config_pack_tab is not None:
+            self.tabs.addTab(self.config_pack_tab, "配置包管理")
         self.tabs.addTab(self.field_tab, "字段管理")
         self.tabs.addTab(self.entry_config_tab, "数据录入配置")
         self.tabs.addTab(self.display_config_tab, "今日展示 / 查询汇总配置")
@@ -111,6 +119,8 @@ class FieldReportConfigTab(QWidget):
         self.config_export_btn.clicked.connect(self.on_export_config)
         self.config_import_btn.clicked.connect(self.on_import_config)
         self.config_reset_btn.clicked.connect(self.on_reset_all_config)
+        if self.config_pack_tab is not None:
+            self.config_pack_tab.config_changed.connect(self.config_changed.emit)
 
     def _build_overview_tab(self) -> QWidget:
         page = QWidget()
@@ -460,6 +470,8 @@ class FieldReportConfigTab(QWidget):
     def reload(self) -> None:
         self.reload_overview()
         self.reload_fields()
+        if self.config_pack_tab is not None:
+            self.config_pack_tab.reload_state()
         for i in range(self.tabs.count()):
             page = self.tabs.widget(i)
             combo = getattr(page, "_page_combo", None)

@@ -217,6 +217,28 @@ def _ensure_dynamic_metric_value_table(conn) -> None:
     )
 
 
+def _ensure_config_pack_tables(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS config_pack_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            current_pack_id TEXT,
+            current_pack_version TEXT,
+            imported_at TEXT,
+            imported_by TEXT,
+            import_mode TEXT,
+            source_file TEXT,
+            health_status TEXT,
+            notes TEXT
+        );
+        """
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_config_pack_state_imported_at "
+        "ON config_pack_state(imported_at DESC, id DESC);"
+    )
+
+
 def _migrate_legacy_daily_records(conn) -> None:
     """将旧版本字段尽量映射到 V1.0 字段，避免升级后索引或查询失效。"""
 
@@ -715,6 +737,7 @@ def run_migrations(db_manager) -> None:
 
         _ensure_field_config_tables(conn)
         _ensure_dynamic_metric_value_table(conn)
+        _ensure_config_pack_tables(conn)
         _bootstrap_defaults(conn)
         conn.commit()
     LOGGER.info("数据库迁移完成，schema_version=%s business_rules_version=%s", SCHEMA_VERSION, BUSINESS_RULES_VERSION)

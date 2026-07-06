@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List
 
+from app.utils.paths import app_data_dir
+
 
 def _is_writable(path: Path) -> bool:
     try:
@@ -37,9 +39,9 @@ def collect_runtime_report(base_dir: Path) -> Dict[str, object]:
     else:
         warnings.append("当前不是 Windows 系统，仅用于开发调试。")
 
-    data_dir = base_dir / "data"
-    exports_dir = base_dir / "exports"
-    logs_dir = base_dir / "logs"
+    data_dir = app_data_dir("data")
+    exports_dir = app_data_dir("exports")
+    logs_dir = app_data_dir("logs")
 
     for p in (data_dir, exports_dir, logs_dir):
         if not _is_writable(p):

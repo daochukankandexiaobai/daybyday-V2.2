@@ -470,6 +470,7 @@ class MainWindow(QMainWindow):
         self.admin_action_logs_tab = AdminActionLogsTab(self.services["admin_action_log_service"])
         self.field_report_config_tab = FieldReportConfigTab(
             self.services["field_admin_config_service"],
+            config_pack_service=self.services.get("config_pack_service"),
             operator_getter=self.get_admin_operator,
         )
 

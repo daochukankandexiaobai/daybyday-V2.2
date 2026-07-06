@@ -2,11 +2,12 @@
 from pathlib import Path
 from typing import Optional
 
+from app.utils.paths import app_data_dir
+
 
 class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None) -> None:
-        base_dir = Path(__file__).resolve().parents[2]
-        data_dir = base_dir / "data"
+        data_dir = app_data_dir("data")
         data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = Path(db_path) if db_path else data_dir / "team_report.db"
         self.db_path.parent.mkdir(parents=True, exist_ok=True)

@@ -19,6 +19,7 @@ from app.db.repositories import (
     WeeklyTargetRepository,
 )
 from app.fields.field_value_service import FieldValueService
+from app.fields.config_pack_service import ConfigPackService
 from app.services.auth_service import AuthService
 from app.services.admin_action_log_service import AdminActionLogService
 from app.services.admin_data_service import AdminDataService
@@ -109,6 +110,11 @@ def build_services(db_manager: DatabaseManager) -> dict:
         db_manager,
         admin_action_log_service=admin_action_log_service,
     )
+    config_pack_service = ConfigPackService(
+        db_manager,
+        admin_action_log_service=admin_action_log_service,
+        settings_service=settings_service,
+    )
 
     services = {
         "settings_service": settings_service,
@@ -160,6 +166,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
         "admin_team_service": admin_team_service,
         "admin_data_service": admin_data_service,
         "field_admin_config_service": field_admin_config_service,
+        "config_pack_service": config_pack_service,
     }
     return services
 
