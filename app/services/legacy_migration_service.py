@@ -689,6 +689,9 @@ class LegacyMigrationService:
                 )
 
             if confirmed_targets:
+                target_rule_key = ""
+                if self.settlement_cycle_service is not None:
+                    target_rule_key = self.settlement_cycle_service.rule_key_for_date(parse_date(start_date))
                 target_cycles = sorted(
                     {
                         str(x.get("settlement_cycle_code", "")).strip()
@@ -699,8 +702,9 @@ class LegacyMigrationService:
                 if target_cycles:
                     placeholders = ",".join(["?" for _ in target_cycles])
                     conn.execute(
-                        f"DELETE FROM cycle_targets WHERE team_id = ? AND settlement_cycle_code IN ({placeholders})",
-                        [team_id, *target_cycles],
+                        f"DELETE FROM cycle_targets WHERE team_id = ? "
+                        f"AND settlement_cycle_rule_key = ? AND settlement_cycle_code IN ({placeholders})",
+                        [team_id, target_rule_key, *target_cycles],
                     )
 
                 for target in confirmed_targets:
@@ -711,15 +715,17 @@ class LegacyMigrationService:
                     conn.execute(
                         """
                         INSERT INTO cycle_targets
-                        (team_id, account_manager_id, settlement_cycle_code, target_amount, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        ON CONFLICT(team_id, account_manager_id, settlement_cycle_code)
+                        (team_id, account_manager_id, settlement_cycle_code, settlement_cycle_rule_key,
+                         target_amount, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(team_id, account_manager_id, settlement_cycle_rule_key, settlement_cycle_code)
                         DO UPDATE SET target_amount = excluded.target_amount, updated_at = excluded.updated_at
                         """,
                         (
                             team_id,
                             manager_id,
                             str(target.get("settlement_cycle_code", "")).strip(),
+                            target_rule_key,
                             safe_decimal(target.get("target_amount", 0)),
                             now,
                             now,
@@ -763,6 +769,11 @@ class LegacyMigrationService:
                     "account_manager_id": manager_id,
                     "account_manager_name_snapshot": manager_name,
                     "settlement_cycle_code": settlement_cycle_code,
+                    "settlement_cycle_rule_key": (
+                        self.settlement_cycle_service.rule_key_for_date(parse_date(record_date))
+                        if self.settlement_cycle_service is not None
+                        else ""
+                    ),
                     "business_key": business_key,
                     "remark": str(row.get("remark") or ""),
                     "version": max(1, safe_int(row.get("version", 1))),
@@ -790,6 +801,7 @@ class LegacyMigrationService:
                     "account_manager_id",
                     "account_manager_name_snapshot",
                     "settlement_cycle_code",
+                    "settlement_cycle_rule_key",
                     "repayment_amount_daily",
                     "loan_amount_daily",
                     "intention_daily",

@@ -343,10 +343,21 @@ class RecordService:
         legacy_month = idx % 12 + 1
         return f"{legacy_year:04d}-{legacy_month:02d}期"
 
-    def _manager_target(self, team_id: int, account_manager_id: int, cycle_code: str) -> float:
+    def _manager_target(
+        self,
+        team_id: int,
+        account_manager_id: int,
+        cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> float:
         normalized = normalize_cycle_code_text(cycle_code)
-        target = self.cycle_target_repo.get_target(team_id, account_manager_id, normalized)
-        if target > 0:
+        target = self.cycle_target_repo.get_target(
+            team_id,
+            account_manager_id,
+            normalized,
+            settlement_cycle_rule_key,
+        )
+        if target > 0 or settlement_cycle_rule_key:
             return target
         legacy = self._legacy_cycle_code(normalized)
         if legacy != normalized:
@@ -355,10 +366,15 @@ class RecordService:
                 return legacy_target
         return target
 
-    def _team_target(self, team_id: int, cycle_code: str) -> float:
+    def _team_target(
+        self,
+        team_id: int,
+        cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> float:
         normalized = normalize_cycle_code_text(cycle_code)
-        target = self.cycle_target_repo.team_target_sum(team_id, normalized)
-        if target > 0:
+        target = self.cycle_target_repo.team_target_sum(team_id, normalized, settlement_cycle_rule_key)
+        if target > 0 or settlement_cycle_rule_key:
             return target
         legacy = self._legacy_cycle_code(normalized)
         if legacy != normalized:
@@ -373,6 +389,7 @@ class RecordService:
             "team_id": int(payload["team_id"]),
             "account_manager_id": int(payload["account_manager_id"]),
             "settlement_cycle_code": payload["settlement_cycle_code"],
+            "settlement_cycle_rule_key": payload.get("settlement_cycle_rule_key", ""),
             "team_name_snapshot": payload.get("team_name_snapshot", ""),
             "team_manager_name_snapshot": payload.get("team_manager_name_snapshot", ""),
             "account_manager_name_snapshot": payload.get("account_manager_name_snapshot", ""),
@@ -550,6 +567,7 @@ class RecordService:
 
         date_obj = parse_date(record_date)
         cycle = self.settlement_cycle_service.cycle_for_date(date_obj)
+        cycle_rule_key = self.settlement_cycle_service.rule_key_for_date(date_obj)
         week_info = self.settlement_cycle_service.cycle_week_for_date(date_obj)
 
         members = self.account_manager_repo.list_by_team(team_id)
@@ -578,7 +596,7 @@ class RecordService:
             end_date=cycle.end_inclusive.isoformat(),
             team_id=team_id,
         )
-        team_target = self._team_target(team_id, cycle.code)
+        team_target = self._team_target(team_id, cycle.code, cycle_rule_key)
         summary = self._aggregate(cycle_rows, team_target=team_target, include_progress=True)
 
         return {
@@ -586,6 +604,7 @@ class RecordService:
             "team": team,
             "record_date": record_date,
             "cycle_code": self.settlement_cycle_service.cycle_display_code(record_date=record_date),
+            "cycle_rule_key": cycle_rule_key,
             "cycle_start": cycle.start.isoformat(),
             "cycle_end": cycle.end_inclusive.isoformat(),
             "week_label": week_info["week_label"],
@@ -691,6 +710,7 @@ class RecordService:
             "account_manager_id": account_manager_id,
             "account_manager_name_snapshot": str(member["account_manager_name"]),
             "settlement_cycle_code": self.settlement_cycle_service.cycle_display_code(record_date=record_date),
+            "settlement_cycle_rule_key": self.settlement_cycle_service.rule_key_for_date(parse_date(record_date)),
             "business_key": "|".join(
                 [
                     record_date,
@@ -724,6 +744,7 @@ class RecordService:
                     "team_manager_name_snapshot": payload["team_manager_name_snapshot"],
                     "account_manager_name_snapshot": payload["account_manager_name_snapshot"],
                     "settlement_cycle_code": payload["settlement_cycle_code"],
+                    "settlement_cycle_rule_key": payload["settlement_cycle_rule_key"],
                     "business_key": payload["business_key"],
                     "version": int(existing.get("version", 1)) + 1,
                     "updated_at": now,
@@ -804,7 +825,11 @@ class RecordService:
         cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
         team_target = 0.0
         if not cross_cycle:
-            team_target = self._team_target(team_id, self.settlement_cycle_service.cycle_for_date(start_date).code)
+            team_target = self._team_target(
+                team_id,
+                self.settlement_cycle_service.cycle_for_date(start_date).code,
+                self.settlement_cycle_service.rule_key_for_date(start_date),
+            )
 
         summary = self._aggregate(rows, team_target=team_target, include_progress=not cross_cycle)
         cycle_codes = self.settlement_cycle_service.canonical_cycle_codes_from_dates(
@@ -951,6 +976,7 @@ class RecordService:
         if team_ids is not None and not explicit_team_ids:
             cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
             cycle_code = self.settlement_cycle_service.cycle_for_date(start_date).code
+            cycle_rule_key = self.settlement_cycle_service.rule_key_for_date(start_date)
             query_range = f"{start_date.isoformat()} ~ {end_date.isoformat()}"
             return {
                 "start_date": start_date.isoformat(),
@@ -974,6 +1000,7 @@ class RecordService:
 
         cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
         cycle_code = self.settlement_cycle_service.cycle_for_date(start_date).code
+        cycle_rule_key = self.settlement_cycle_service.rule_key_for_date(start_date)
         query_range = f"{start_date.isoformat()} ~ {end_date.isoformat()}"
 
         grouped: dict[str, dict[str, Any]] = {}
@@ -1033,7 +1060,12 @@ class RecordService:
 
             cycle_target = None
             if not cross_cycle and manager_id > 0 and manager_team_id > 0:
-                cycle_target = self._manager_target(manager_team_id, manager_id, cycle_code)
+                cycle_target = self._manager_target(
+                    manager_team_id,
+                    manager_id,
+                    cycle_code,
+                    cycle_rule_key,
+                )
             repayment_amount = float(totals.get("repayment_amount_daily", 0) or 0)
             loan_amount = float(totals.get("loan_amount_daily", 0) or 0)
 
@@ -1085,12 +1117,16 @@ class RecordService:
         total_target = 0.0
         if not cross_cycle:
             if len(explicit_team_ids) == 1:
-                total_target = self._team_target(explicit_team_ids[0], cycle_code)
+                total_target = self._team_target(explicit_team_ids[0], cycle_code, cycle_rule_key)
             elif explicit_team_ids:
-                total_target = sum(self._team_target(tid, cycle_code) for tid in explicit_team_ids)
+                total_target = sum(
+                    self._team_target(tid, cycle_code, cycle_rule_key) for tid in explicit_team_ids
+                )
             else:
                 team_ids = {int(row.get("team_id", 0) or 0) for row in rows if int(row.get("team_id", 0) or 0) > 0}
-                total_target = sum(self._team_target(tid, cycle_code) for tid in team_ids)
+                total_target = sum(
+                    self._team_target(tid, cycle_code, cycle_rule_key) for tid in team_ids
+                )
         summary = self._build_query_summary_aggregate(
             summary_source_rows,
             team_target=total_target,

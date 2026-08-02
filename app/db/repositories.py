@@ -539,6 +539,7 @@ class CycleTargetRepository(BaseRepository):
         target_amount: float,
         now: str,
         conn: sqlite3.Connection | None = None,
+        settlement_cycle_rule_key: str = "",
     ) -> None:
         if conn is None:
             with self.db.get_connection() as local_conn:
@@ -549,6 +550,7 @@ class CycleTargetRepository(BaseRepository):
                     target_amount,
                     now,
                     conn=local_conn,
+                    settlement_cycle_rule_key=settlement_cycle_rule_key,
                 )
                 local_conn.commit()
             return
@@ -556,15 +558,34 @@ class CycleTargetRepository(BaseRepository):
         conn.execute(
             """
             INSERT INTO cycle_targets
-            (team_id, account_manager_id, settlement_cycle_code, target_amount, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(team_id, account_manager_id, settlement_cycle_code)
+            (team_id, account_manager_id, settlement_cycle_code, settlement_cycle_rule_key,
+             target_amount, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(team_id, account_manager_id, settlement_cycle_rule_key, settlement_cycle_code)
             DO UPDATE SET target_amount = excluded.target_amount, updated_at = excluded.updated_at
             """,
-            (team_id, account_manager_id, settlement_cycle_code, target_amount, now, now),
+            (
+                team_id,
+                account_manager_id,
+                settlement_cycle_code,
+                str(settlement_cycle_rule_key or "").strip(),
+                target_amount,
+                now,
+                now,
+            ),
         )
 
-    def list_targets(self, team_id: int, settlement_cycle_code: str) -> list[dict[str, Any]]:
+    def list_targets(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> list[dict[str, Any]]:
+        where = "ct.team_id = ? AND ct.settlement_cycle_code = ?"
+        params: list[Any] = [team_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND ct.settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 """
@@ -574,48 +595,81 @@ class CycleTargetRepository(BaseRepository):
                     ct.account_manager_id,
                     am.account_manager_name,
                     ct.settlement_cycle_code,
+                    ct.settlement_cycle_rule_key,
                     ct.target_amount,
                     ct.created_at,
                     ct.updated_at
                 FROM cycle_targets ct
                 JOIN account_managers am ON am.id = ct.account_manager_id
-                WHERE ct.team_id = ? AND ct.settlement_cycle_code = ?
+                WHERE {where}
                 ORDER BY am.account_manager_name ASC
-                """,
-                (team_id, settlement_cycle_code),
+                """.format(where=where),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def get_target(self, team_id: int, account_manager_id: int, settlement_cycle_code: str) -> float:
+    def get_target(
+        self,
+        team_id: int,
+        account_manager_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> float:
+        where = "team_id = ? AND account_manager_id = ? AND settlement_cycle_code = ?"
+        params: list[Any] = [team_id, account_manager_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             row = conn.execute(
                 """
                 SELECT target_amount
                 FROM cycle_targets
-                WHERE team_id = ? AND account_manager_id = ? AND settlement_cycle_code = ?
+                WHERE {where}
+                ORDER BY id DESC
                 LIMIT 1
-                """,
-                (team_id, account_manager_id, settlement_cycle_code),
+                """.format(where=where),
+                params,
             ).fetchone()
             if row is None:
                 return 0.0
             return float(row["target_amount"] or 0.0)
 
-    def team_target_sum(self, team_id: int, settlement_cycle_code: str) -> float:
+    def team_target_sum(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> float:
+        where = "team_id = ? AND settlement_cycle_code = ?"
+        params: list[Any] = [team_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             row = conn.execute(
                 """
                 SELECT COALESCE(SUM(target_amount), 0) AS target_sum
                 FROM cycle_targets
-                WHERE team_id = ? AND settlement_cycle_code = ?
-                """,
-                (team_id, settlement_cycle_code),
+                WHERE {where}
+                """.format(where=where),
+                params,
             ).fetchone()
             return float(row["target_sum"] or 0.0)
 
 
 class WeeklyTargetRepository(BaseRepository):
-    def list_targets_for_team_cycle(self, team_id: int, settlement_cycle_code: str) -> list[dict[str, Any]]:
+    def list_targets_for_team_cycle(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> list[dict[str, Any]]:
+        where = "wt.team_id = ? AND wt.settlement_cycle_code = ?"
+        params: list[Any] = [team_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND wt.settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 """
@@ -624,10 +678,10 @@ class WeeklyTargetRepository(BaseRepository):
                     am.account_manager_name
                 FROM weekly_targets wt
                 LEFT JOIN account_managers am ON am.id = wt.account_manager_id
-                WHERE wt.team_id = ? AND wt.settlement_cycle_code = ?
+                WHERE {where}
                 ORDER BY wt.week_index ASC, am.account_manager_name ASC, wt.account_manager_id ASC
-                """,
-                (team_id, settlement_cycle_code),
+                """.format(where=where),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -636,18 +690,22 @@ class WeeklyTargetRepository(BaseRepository):
         team_id: int,
         account_manager_id: int,
         settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
     ) -> list[dict[str, Any]]:
+        where = "team_id = ? AND account_manager_id = ? AND settlement_cycle_code = ?"
+        params: list[Any] = [team_id, account_manager_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 """
                 SELECT *
                 FROM weekly_targets
-                WHERE team_id = ?
-                  AND account_manager_id = ?
-                  AND settlement_cycle_code = ?
+                WHERE {where}
                 ORDER BY week_index ASC
-                """,
-                (team_id, account_manager_id, settlement_cycle_code),
+                """.format(where=where),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -656,7 +714,13 @@ class WeeklyTargetRepository(BaseRepository):
         team_id: int,
         settlement_cycle_code: str,
         week_index: int,
+        settlement_cycle_rule_key: str = "",
     ) -> list[dict[str, Any]]:
+        where = "wt.team_id = ? AND wt.settlement_cycle_code = ? AND wt.week_index = ?"
+        params: list[Any] = [team_id, settlement_cycle_code, week_index]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND wt.settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             rows = conn.execute(
                 """
@@ -665,12 +729,10 @@ class WeeklyTargetRepository(BaseRepository):
                     am.account_manager_name
                 FROM weekly_targets wt
                 LEFT JOIN account_managers am ON am.id = wt.account_manager_id
-                WHERE wt.team_id = ?
-                  AND wt.settlement_cycle_code = ?
-                  AND wt.week_index = ?
+                WHERE {where}
                 ORDER BY am.account_manager_name ASC, wt.account_manager_id ASC
-                """,
-                (team_id, settlement_cycle_code, week_index),
+                """.format(where=where),
+                params,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -682,11 +744,18 @@ class WeeklyTargetRepository(BaseRepository):
         rows: list[dict[str, Any]],
         now: str,
         conn: sqlite3.Connection | None = None,
+        settlement_cycle_rule_key: str = "",
     ) -> int:
         if conn is None:
             with self.db.get_connection() as local_conn:
                 saved_count = self.replace_targets_for_team_week(
-                    team_id, settlement_cycle_code, week_index, rows, now, conn=local_conn
+                    team_id,
+                    settlement_cycle_code,
+                    week_index,
+                    rows,
+                    now,
+                    conn=local_conn,
+                    settlement_cycle_rule_key=settlement_cycle_rule_key,
                 )
                 local_conn.commit()
                 return saved_count
@@ -697,8 +766,9 @@ class WeeklyTargetRepository(BaseRepository):
             WHERE team_id = ?
               AND settlement_cycle_code = ?
               AND week_index = ?
+              AND settlement_cycle_rule_key = ?
             """,
-            (team_id, settlement_cycle_code, week_index),
+            (team_id, settlement_cycle_code, week_index, str(settlement_cycle_rule_key or "").strip()),
         )
         saved_count = 0
         for row in rows:
@@ -707,6 +777,7 @@ class WeeklyTargetRepository(BaseRepository):
                 INSERT INTO weekly_targets
                 (
                     settlement_cycle_code,
+                    settlement_cycle_rule_key,
                     week_index,
                     week_start_date,
                     week_end_date,
@@ -719,10 +790,11 @@ class WeeklyTargetRepository(BaseRepository):
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settlement_cycle_code,
+                    str(settlement_cycle_rule_key or "").strip(),
                     int(row.get("week_index", 0) or 0),
                     str(row.get("week_start_date", "")).strip(),
                     str(row.get("week_end_date", "")).strip(),
@@ -746,11 +818,17 @@ class WeeklyTargetRepository(BaseRepository):
         rows: list[dict[str, Any]],
         now: str,
         conn: sqlite3.Connection | None = None,
+        settlement_cycle_rule_key: str = "",
     ) -> int:
         if conn is None:
             with self.db.get_connection() as local_conn:
                 saved_count = self.replace_targets_for_team_cycle(
-                    team_id, settlement_cycle_code, rows, now, conn=local_conn
+                    team_id,
+                    settlement_cycle_code,
+                    rows,
+                    now,
+                    conn=local_conn,
+                    settlement_cycle_rule_key=settlement_cycle_rule_key,
                 )
                 local_conn.commit()
                 return saved_count
@@ -758,9 +836,9 @@ class WeeklyTargetRepository(BaseRepository):
         conn.execute(
             """
             DELETE FROM weekly_targets
-            WHERE team_id = ? AND settlement_cycle_code = ?
+            WHERE team_id = ? AND settlement_cycle_code = ? AND settlement_cycle_rule_key = ?
             """,
-            (team_id, settlement_cycle_code),
+            (team_id, settlement_cycle_code, str(settlement_cycle_rule_key or "").strip()),
         )
         saved_count = 0
         for row in rows:
@@ -769,6 +847,7 @@ class WeeklyTargetRepository(BaseRepository):
                 INSERT INTO weekly_targets
                 (
                     settlement_cycle_code,
+                    settlement_cycle_rule_key,
                     week_index,
                     week_start_date,
                     week_end_date,
@@ -781,10 +860,11 @@ class WeeklyTargetRepository(BaseRepository):
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     settlement_cycle_code,
+                    str(settlement_cycle_rule_key or "").strip(),
                     int(row.get("week_index", 0) or 0),
                     str(row.get("week_start_date", "")).strip(),
                     str(row.get("week_end_date", "")).strip(),
@@ -806,10 +886,21 @@ class WeeklyTargetRepository(BaseRepository):
         team_id: int,
         settlement_cycle_code: str,
         conn: sqlite3.Connection | None = None,
+        settlement_cycle_rule_key: str = "",
     ) -> dict[int, dict[str, Any]]:
         if conn is None:
             with self.db.get_connection() as local_conn:
-                return self.sum_targets_by_manager(team_id, settlement_cycle_code, conn=local_conn)
+                return self.sum_targets_by_manager(
+                    team_id,
+                    settlement_cycle_code,
+                    conn=local_conn,
+                    settlement_cycle_rule_key=settlement_cycle_rule_key,
+                )
+        where = "team_id = ? AND settlement_cycle_code = ?"
+        params: list[Any] = [team_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         rows = conn.execute(
             """
             SELECT
@@ -818,14 +909,24 @@ class WeeklyTargetRepository(BaseRepository):
                 COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
                 COALESCE(SUM(repayment_target), 0) AS repayment_target
             FROM weekly_targets
-            WHERE team_id = ? AND settlement_cycle_code = ?
+            WHERE {where}
             GROUP BY account_manager_id
-            """,
-            (team_id, settlement_cycle_code),
+            """.format(where=where),
+            params,
         ).fetchall()
         return {int(row["account_manager_id"]): dict(row) for row in rows}
 
-    def sum_targets_for_team(self, team_id: int, settlement_cycle_code: str) -> dict[str, Any]:
+    def sum_targets_for_team(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> dict[str, Any]:
+        where = "team_id = ? AND settlement_cycle_code = ?"
+        params: list[Any] = [team_id, settlement_cycle_code]
+        if str(settlement_cycle_rule_key or "").strip():
+            where += " AND settlement_cycle_rule_key = ?"
+            params.append(str(settlement_cycle_rule_key).strip())
         with self.db.get_connection() as conn:
             row = conn.execute(
                 """
@@ -834,9 +935,9 @@ class WeeklyTargetRepository(BaseRepository):
                     COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
                     COALESCE(SUM(repayment_target), 0) AS repayment_target
                 FROM weekly_targets
-                WHERE team_id = ? AND settlement_cycle_code = ?
-                """,
-                (team_id, settlement_cycle_code),
+                WHERE {where}
+                """.format(where=where),
+                params,
             ).fetchone()
             return dict(row) if row is not None else {
                 "visit_target": 0,
@@ -1200,9 +1301,22 @@ class SettingsRepository(BaseRepository):
 
 
 class SettlementCycleRuleRepository(BaseRepository):
-    """Persist the single organization-wide settlement cycle rule."""
+    """Persist an effective-date timeline of organization settlement rules."""
+
+    def list_active_rules(self) -> list[dict[str, Any]]:
+        with self.db.get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM settlement_cycle_rules
+                WHERE is_active = 1
+                ORDER BY effective_from ASC, id ASC
+                """
+            ).fetchall()
+            return [dict(row) for row in rows]
 
     def get_active_rule(self) -> dict[str, Any] | None:
+        """Compatibility accessor: return the most recently scheduled active rule."""
         with self.db.get_connection() as conn:
             row = conn.execute(
                 """
@@ -1215,6 +1329,65 @@ class SettlementCycleRuleRepository(BaseRepository):
             ).fetchone()
             return self._row_to_dict(row)
 
+    def get_earliest_rule(self) -> dict[str, Any] | None:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM settlement_cycle_rules
+                WHERE is_active = 1
+                ORDER BY effective_from ASC, id ASC
+                LIMIT 1
+                """
+            ).fetchone()
+            return self._row_to_dict(row)
+
+    def get_rule_for_date(self, date_text: str) -> dict[str, Any] | None:
+        normalized_date = str(date_text or "").strip()
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM settlement_cycle_rules
+                WHERE is_active = 1 AND effective_from <= ?
+                ORDER BY effective_from DESC, id DESC
+                LIMIT 1
+                """,
+                (normalized_date,),
+            ).fetchone()
+            if row is None:
+                row = conn.execute(
+                    """
+                    SELECT *
+                    FROM settlement_cycle_rules
+                    WHERE is_active = 1
+                    ORDER BY effective_from ASC, id ASC
+                    LIMIT 1
+                    """
+                ).fetchone()
+            return self._row_to_dict(row)
+
+    def get_rule_by_key(self, rule_key: str) -> dict[str, Any] | None:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM settlement_cycle_rules WHERE rule_key = ? LIMIT 1",
+                (str(rule_key or "").strip(),),
+            ).fetchone()
+            return self._row_to_dict(row)
+
+    def get_rule_by_effective_from(self, effective_from: str) -> dict[str, Any] | None:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM settlement_cycle_rules
+                WHERE is_active = 1 AND effective_from = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (str(effective_from or "").strip(),),
+            ).fetchone()
+            return self._row_to_dict(row)
+
     def has_business_data(self) -> bool:
         with self.db.get_connection() as conn:
             for table_name in ("daily_records", "weekly_targets", "cycle_targets"):
@@ -1224,6 +1397,23 @@ class SettlementCycleRuleRepository(BaseRepository):
                 if row is not None:
                     return True
         return False
+
+    def latest_business_date(self) -> str:
+        """Return the latest date carrying a date-bound business snapshot."""
+        candidates: list[str] = []
+        with self.db.get_connection() as conn:
+            for sql in [
+                "SELECT MAX(record_date) AS value FROM daily_records",
+                "SELECT MAX(week_end_date) AS value FROM weekly_targets",
+            ]:
+                row = conn.execute(sql).fetchone()
+                if row is not None and str(row["value"] or "").strip():
+                    candidates.append(str(row["value"]).strip())
+        return max(candidates) if candidates else ""
+
+    def has_cycle_targets(self) -> bool:
+        with self.db.get_connection() as conn:
+            return conn.execute("SELECT 1 FROM cycle_targets LIMIT 1").fetchone() is not None
 
     def update_active_initial_rule(
         self,
@@ -1238,7 +1428,7 @@ class SettlementCycleRuleRepository(BaseRepository):
                 SELECT id, is_locked
                 FROM settlement_cycle_rules
                 WHERE is_active = 1
-                ORDER BY effective_from DESC, id DESC
+                ORDER BY effective_from ASC, id ASC
                 LIMIT 1
                 """
             ).fetchone()
@@ -1257,6 +1447,75 @@ class SettlementCycleRuleRepository(BaseRepository):
             )
             conn.commit()
             return True
+
+    def insert_successor_rule(
+        self,
+        rule_key: str,
+        rule_mode: str,
+        start_day: int,
+        effective_from: str,
+        operator: str,
+        now: str,
+        is_locked: int = 1,
+    ) -> bool:
+        with self.db.get_connection() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM settlement_cycle_rules WHERE is_active = 1 AND effective_from = ? LIMIT 1",
+                (str(effective_from or "").strip(),),
+            ).fetchone()
+            if exists is not None:
+                return False
+            conn.execute(
+                """
+                INSERT INTO settlement_cycle_rules
+                (rule_key, rule_mode, start_day, effective_from, is_active, is_locked,
+                 created_at, updated_at, created_by, updated_by)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(rule_key or "").strip(),
+                    str(rule_mode or "").strip(),
+                    int(start_day),
+                    str(effective_from or "").strip(),
+                    int(is_locked),
+                    now,
+                    now,
+                    str(operator or "admin"),
+                    str(operator or "admin"),
+                ),
+            )
+            conn.commit()
+            return True
+
+    def update_rule_definition(
+        self,
+        rule_id: int,
+        rule_key: str,
+        rule_mode: str,
+        start_day: int,
+        is_locked: int,
+        operator: str,
+        now: str,
+    ) -> None:
+        with self.db.get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE settlement_cycle_rules
+                SET rule_key = ?, rule_mode = ?, start_day = ?, is_locked = ?,
+                    updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (
+                    str(rule_key or "").strip(),
+                    str(rule_mode or "").strip(),
+                    int(start_day),
+                    int(is_locked),
+                    now,
+                    str(operator or "import"),
+                    int(rule_id),
+                ),
+            )
+            conn.commit()
 
     def lock_active_rule(self, operator: str, now: str) -> bool:
         with self.db.get_connection() as conn:

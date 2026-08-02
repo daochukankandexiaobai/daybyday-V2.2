@@ -9,8 +9,8 @@ from app.utils.log_utils import get_logger
 
 DEFAULT_TEMPLATE_NAME = "V1.0日报模板"
 DEFAULT_TEMPLATE_VERSION = "2026.04.01"
-SCHEMA_VERSION = "1.6"
-BUSINESS_RULES_VERSION = "1.2"
+SCHEMA_VERSION = "1.7"
+BUSINESS_RULES_VERSION = "1.3"
 DAILY_RECORD_MAINTENANCE_VERSION = "1"
 FIELD_CONFIG_DEFAULTS_VERSION = "1"
 
@@ -102,6 +102,235 @@ def _ensure_settlement_cycle_rule_table(conn) -> None:
             updated_by TEXT DEFAULT ''
         );
         """
+    )
+
+
+def _table_exists(conn, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _create_cycle_targets_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS cycle_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_id INTEGER NOT NULL,
+            account_manager_id INTEGER NOT NULL,
+            settlement_cycle_code TEXT NOT NULL,
+            settlement_cycle_rule_key TEXT NOT NULL DEFAULT '',
+            target_amount REAL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(team_id, account_manager_id, settlement_cycle_rule_key, settlement_cycle_code),
+            FOREIGN KEY(team_id) REFERENCES teams(id),
+            FOREIGN KEY(account_manager_id) REFERENCES account_managers(id)
+        );
+        """
+    )
+
+
+def _create_weekly_targets_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS weekly_targets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            settlement_cycle_code TEXT NOT NULL,
+            settlement_cycle_rule_key TEXT NOT NULL DEFAULT '',
+            week_index INTEGER NOT NULL,
+            week_start_date TEXT NOT NULL,
+            week_end_date TEXT NOT NULL,
+            team_id INTEGER NOT NULL,
+            account_manager_id INTEGER NOT NULL,
+            visit_target INTEGER DEFAULT 0,
+            quality_visit_target INTEGER DEFAULT 0,
+            repayment_target REAL DEFAULT 0,
+            version INTEGER DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(settlement_cycle_rule_key, settlement_cycle_code, week_index, team_id, account_manager_id),
+            FOREIGN KEY(team_id) REFERENCES teams(id),
+            FOREIGN KEY(account_manager_id) REFERENCES account_managers(id)
+        );
+        """
+    )
+
+
+def _has_unique_index(conn, table_name: str, fields: tuple[str, ...]) -> bool:
+    for index_row in conn.execute("PRAGMA index_list({})".format(table_name)).fetchall():
+        if int(index_row[2] or 0) != 1:
+            continue
+        index_name = str(index_row[1])
+        index_fields = tuple(
+            str(row[2])
+            for row in conn.execute("PRAGMA index_info({})".format(_quote_identifier(index_name))).fetchall()
+        )
+        if index_fields == fields:
+            return True
+    return False
+
+
+def _rebuild_cycle_targets_for_rule_snapshot(conn, fallback_rule_key: str) -> None:
+    expected_fields = (
+        "team_id",
+        "account_manager_id",
+        "settlement_cycle_rule_key",
+        "settlement_cycle_code",
+    )
+    if (
+        "settlement_cycle_rule_key" in _table_columns(conn, "cycle_targets")
+        and _has_unique_index(conn, "cycle_targets", expected_fields)
+    ):
+        return
+
+    backup_name = "cycle_targets_rule_snapshot_backup"
+    if _table_exists(conn, backup_name):
+        raise RuntimeError("检测到未完成的周期目标规则快照迁移备份表，请先联系维护人员")
+    source_columns = _table_columns(conn, "cycle_targets")
+    conn.execute("ALTER TABLE cycle_targets RENAME TO {}".format(_quote_identifier(backup_name)))
+    _create_cycle_targets_table(conn)
+    rule_key_expression = (
+        "COALESCE(NULLIF(settlement_cycle_rule_key, ''), ?)"
+        if "settlement_cycle_rule_key" in source_columns
+        else "?"
+    )
+    conn.execute(
+        """
+        INSERT INTO cycle_targets
+        (id, team_id, account_manager_id, settlement_cycle_code, settlement_cycle_rule_key,
+         target_amount, created_at, updated_at)
+        SELECT id, team_id, account_manager_id, settlement_cycle_code, {rule_key},
+               target_amount, created_at, updated_at
+        FROM {backup}
+        """.format(rule_key=rule_key_expression, backup=_quote_identifier(backup_name)),
+        (fallback_rule_key,),
+    )
+    conn.execute("DROP TABLE {}".format(_quote_identifier(backup_name)))
+    LOGGER.info("已为 cycle_targets 增加结算周期规则快照")
+
+
+def _rebuild_weekly_targets_for_rule_snapshot(conn, fallback_rule_key: str) -> None:
+    expected_fields = (
+        "settlement_cycle_rule_key",
+        "settlement_cycle_code",
+        "week_index",
+        "team_id",
+        "account_manager_id",
+    )
+    if (
+        "settlement_cycle_rule_key" in _table_columns(conn, "weekly_targets")
+        and _has_unique_index(conn, "weekly_targets", expected_fields)
+    ):
+        return
+
+    backup_name = "weekly_targets_rule_snapshot_backup"
+    if _table_exists(conn, backup_name):
+        raise RuntimeError("检测到未完成的周目标规则快照迁移备份表，请先联系维护人员")
+    source_columns = _table_columns(conn, "weekly_targets")
+    conn.execute("ALTER TABLE weekly_targets RENAME TO {}".format(_quote_identifier(backup_name)))
+    _create_weekly_targets_table(conn)
+    rule_key_expression = (
+        "COALESCE(NULLIF(settlement_cycle_rule_key, ''), ?)"
+        if "settlement_cycle_rule_key" in source_columns
+        else "?"
+    )
+    conn.execute(
+        """
+        INSERT INTO weekly_targets
+        (id, settlement_cycle_code, settlement_cycle_rule_key, week_index, week_start_date, week_end_date,
+         team_id, account_manager_id, visit_target, quality_visit_target, repayment_target, version,
+         created_at, updated_at)
+        SELECT id, settlement_cycle_code, {rule_key}, week_index, week_start_date, week_end_date,
+               team_id, account_manager_id, visit_target, quality_visit_target, repayment_target, version,
+               created_at, updated_at
+        FROM {backup}
+        """.format(rule_key=rule_key_expression, backup=_quote_identifier(backup_name)),
+        (fallback_rule_key,),
+    )
+    conn.execute("DROP TABLE {}".format(_quote_identifier(backup_name)))
+    LOGGER.info("已为 weekly_targets 增加结算周期规则快照")
+
+
+def _rule_key_for_snapshot_date(rule_rows: list[dict], date_text: str, fallback_rule_key: str) -> str:
+    candidate = fallback_rule_key
+    normalized_date = str(date_text or "").strip()
+    for row in rule_rows:
+        effective_from = str(row.get("effective_from", "") or "")
+        if effective_from and effective_from <= normalized_date:
+            candidate = str(row.get("rule_key", "") or candidate)
+        else:
+            break
+    return candidate
+
+
+def _upgrade_settlement_cycle_rule_snapshots(conn) -> None:
+    rule_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT rule_key, effective_from
+            FROM settlement_cycle_rules
+            WHERE is_active = 1
+            ORDER BY effective_from ASC, id ASC
+            """
+        ).fetchall()
+    ]
+    if not rule_rows:
+        return
+    fallback_rule_key = str(rule_rows[0].get("rule_key", "") or "default")
+
+    _rebuild_cycle_targets_for_rule_snapshot(conn, fallback_rule_key)
+    _rebuild_weekly_targets_for_rule_snapshot(conn, fallback_rule_key)
+    _ensure_column(conn, "daily_records", "settlement_cycle_rule_key", "TEXT NOT NULL DEFAULT ''")
+
+    daily_rows = conn.execute(
+        """
+        SELECT id, record_date
+        FROM daily_records
+        WHERE settlement_cycle_rule_key IS NULL OR settlement_cycle_rule_key = ''
+        """
+    ).fetchall()
+    for row in daily_rows:
+        rule_key = _rule_key_for_snapshot_date(rule_rows, str(row["record_date"] or ""), fallback_rule_key)
+        conn.execute(
+            "UPDATE daily_records SET settlement_cycle_rule_key = ? WHERE id = ?",
+            (rule_key, int(row["id"])),
+        )
+
+    conn.execute(
+        "UPDATE cycle_targets SET settlement_cycle_rule_key = ? "
+        "WHERE settlement_cycle_rule_key IS NULL OR settlement_cycle_rule_key = ''",
+        (fallback_rule_key,),
+    )
+    conn.execute(
+        "UPDATE weekly_targets SET settlement_cycle_rule_key = ? "
+        "WHERE settlement_cycle_rule_key IS NULL OR settlement_cycle_rule_key = ''",
+        (fallback_rule_key,),
+    )
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_daily_records_cycle_rule_date "
+        "ON daily_records(settlement_cycle_rule_key, settlement_cycle_code, record_date)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_cycle_targets_rule_cycle "
+        "ON cycle_targets(team_id, settlement_cycle_rule_key, settlement_cycle_code)"
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_weekly_targets_unique_v1")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_targets_unique_v2 "
+        "ON weekly_targets(settlement_cycle_rule_key, settlement_cycle_code, week_index, team_id, account_manager_id)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_weekly_targets_team_rule_cycle "
+        "ON weekly_targets(team_id, settlement_cycle_rule_key, settlement_cycle_code)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_weekly_targets_manager_rule_cycle "
+        "ON weekly_targets(account_manager_id, settlement_cycle_rule_key, settlement_cycle_code)"
     )
     for column_name, ddl in [
         ("rule_key", "TEXT NOT NULL DEFAULT ''"),
@@ -548,47 +777,12 @@ def run_migrations(db_manager) -> None:
             """
         )
 
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS cycle_targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                team_id INTEGER NOT NULL,
-                account_manager_id INTEGER NOT NULL,
-                settlement_cycle_code TEXT NOT NULL,
-                target_amount REAL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(team_id, account_manager_id, settlement_cycle_code),
-                FOREIGN KEY(team_id) REFERENCES teams(id),
-                FOREIGN KEY(account_manager_id) REFERENCES account_managers(id)
-            );
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS weekly_targets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                settlement_cycle_code TEXT NOT NULL,
-                week_index INTEGER NOT NULL,
-                week_start_date TEXT NOT NULL,
-                week_end_date TEXT NOT NULL,
-                team_id INTEGER NOT NULL,
-                account_manager_id INTEGER NOT NULL,
-                visit_target INTEGER DEFAULT 0,
-                quality_visit_target INTEGER DEFAULT 0,
-                repayment_target REAL DEFAULT 0,
-                version INTEGER DEFAULT 1,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                UNIQUE(settlement_cycle_code, week_index, team_id, account_manager_id),
-                FOREIGN KEY(team_id) REFERENCES teams(id),
-                FOREIGN KEY(account_manager_id) REFERENCES account_managers(id)
-            );
-            """
-        )
+        _create_cycle_targets_table(conn)
+        _create_weekly_targets_table(conn)
+        _ensure_column(conn, "cycle_targets", "settlement_cycle_rule_key", "TEXT NOT NULL DEFAULT ''")
         for column_name, ddl in [
             ("settlement_cycle_code", "TEXT NOT NULL DEFAULT ''"),
+            ("settlement_cycle_rule_key", "TEXT NOT NULL DEFAULT ''"),
             ("week_index", "INTEGER NOT NULL DEFAULT 0"),
             ("week_start_date", "TEXT NOT NULL DEFAULT ''"),
             ("week_end_date", "TEXT NOT NULL DEFAULT ''"),
@@ -655,6 +849,7 @@ def run_migrations(db_manager) -> None:
             ("account_manager_id", "INTEGER DEFAULT 0"),
             ("account_manager_name_snapshot", "TEXT DEFAULT ''"),
             ("settlement_cycle_code", "TEXT DEFAULT ''"),
+            ("settlement_cycle_rule_key", "TEXT NOT NULL DEFAULT ''"),
             ("repayment_amount_daily", "REAL DEFAULT 0"),
             ("loan_amount_daily", "REAL DEFAULT 0"),
             ("intention_daily", "INTEGER DEFAULT 0"),
@@ -702,21 +897,6 @@ def run_migrations(db_manager) -> None:
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_account_managers_team ON account_managers(team_id, is_active);"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cycle_targets_cycle ON cycle_targets(team_id, settlement_cycle_code);"
-        )
-        cursor.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_weekly_targets_unique_v1 "
-            "ON weekly_targets(settlement_cycle_code, week_index, team_id, account_manager_id);"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_weekly_targets_team_cycle "
-            "ON weekly_targets(team_id, settlement_cycle_code);"
-        )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_weekly_targets_manager_cycle "
-            "ON weekly_targets(account_manager_id, settlement_cycle_code);"
         )
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_teams_active ON teams(is_active, updated_at DESC, id DESC);"
@@ -829,6 +1009,7 @@ def run_migrations(db_manager) -> None:
         _ensure_settlement_cycle_rule_table(conn)
         _ensure_config_pack_tables(conn)
         _bootstrap_defaults(conn)
+        _upgrade_settlement_cycle_rule_snapshots(conn)
         conn.commit()
     LOGGER.info("数据库迁移完成，schema_version=%s business_rules_version=%s", SCHEMA_VERSION, BUSINESS_RULES_VERSION)
 

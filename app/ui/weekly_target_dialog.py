@@ -41,12 +41,14 @@ class WeeklyTargetDialog(QDialog):
         weekly_target_service,
         team_id: int,
         settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.weekly_target_service = weekly_target_service
         self.team_id = int(team_id or 0)
         self.settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        self.settlement_cycle_rule_key = str(settlement_cycle_rule_key or "").strip()
         self.weeks: list[dict[str, Any]] = []
         self.rows: list[dict[str, Any]] = []
         self.current_week_index = 1
@@ -205,7 +207,10 @@ class WeeklyTargetDialog(QDialog):
         return card
 
     def reload_data(self) -> None:
-        self.weeks = self.weekly_target_service.get_cycle_weeks(self.settlement_cycle_code)
+        self.weeks = self.weekly_target_service.get_cycle_weeks(
+            self.settlement_cycle_code,
+            self.settlement_cycle_rule_key,
+        )
         self.current_week_index = self._default_week_index()
         self._populate_week_combo()
         self._load_current_week()
@@ -254,6 +259,7 @@ class WeeklyTargetDialog(QDialog):
             team_id=self.team_id,
             settlement_cycle_code=self.settlement_cycle_code,
             week_index=self.current_week_index,
+            settlement_cycle_rule_key=self.settlement_cycle_rule_key,
         )
         self.rows = list(data.get("rows", []))
         selected_week = data.get("selected_week") or self._current_week()
@@ -419,6 +425,7 @@ class WeeklyTargetDialog(QDialog):
                 settlement_cycle_code=self.settlement_cycle_code,
                 week_index=self.current_week_index,
                 rows=rows,
+                settlement_cycle_rule_key=self.settlement_cycle_rule_key,
             )
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "保存失败", str(exc))
@@ -514,6 +521,7 @@ class WeeklyTargetDialog(QDialog):
             team_id=self.team_id,
             settlement_cycle_code=self.settlement_cycle_code,
             week_index=self.current_week_index - 1,
+            settlement_cycle_rule_key=self.settlement_cycle_rule_key,
         )
         previous_map = {
             int(row.get("account_manager_id", 0) or 0): row

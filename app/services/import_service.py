@@ -218,7 +218,12 @@ class ImportService:
                     )
                 ]
 
+        rule_key_map = self.settlement_cycle_service.merge_imported_rule_history(
+            self._extract_rule_history(cycle_info),
+            operator="import",
+        )
         master_context = self._sync_master_context(team_context, records)
+        master_context["_settlement_cycle_rule_key_map"] = rule_key_map
 
         file_results: list[dict] = []
         counters = {"success": 0, "updated": 0, "skipped": 0, "conflict": 0, "failed": 0}
@@ -286,6 +291,9 @@ class ImportService:
         return "skipped"
 
     def _resolve_file_cycle_code(self, cycle_info: dict[str, Any], export_info: dict[str, Any], records: list[dict[str, Any]]) -> str:
+        raw_code = str(cycle_info.get("cycle_code", "")).strip()
+        if raw_code:
+            return self.settlement_cycle_service.cycle_display_code(cycle_code=raw_code)
         cycle_start = str(cycle_info.get("cycle_start", "")).strip()
         cycle_end = str(cycle_info.get("cycle_end", "")).strip()
         if cycle_end:
@@ -302,8 +310,34 @@ class ImportService:
             if record_date:
                 return self.settlement_cycle_service.cycle_display_code(record_date=record_date)
 
-        raw_code = str(cycle_info.get("cycle_code", "")).strip()
-        return self.settlement_cycle_service.cycle_display_code(cycle_code=raw_code)
+        return ""
+
+    @staticmethod
+    def _extract_rule_history(cycle_info: dict[str, Any]) -> list[dict[str, Any]]:
+        history = cycle_info.get("rule_history", []) if isinstance(cycle_info, dict) else []
+        if isinstance(history, list) and history:
+            return [item for item in history if isinstance(item, dict)]
+
+        # Older JSON packages did not include a rule timeline.  A 29~28
+        # exported cycle boundary is enough to identify the legacy rule.
+        cycle_start = str(cycle_info.get("cycle_start", "") if isinstance(cycle_info, dict) else "").strip()
+        cycle_end = str(cycle_info.get("cycle_end", "") if isinstance(cycle_info, dict) else "").strip()
+        try:
+            start_obj = parse_date(cycle_start)
+            end_obj = parse_date(cycle_end)
+        except (TypeError, ValueError):
+            return []
+        if start_obj.day == 29 and end_obj.day == 28:
+            return [
+                {
+                    "rule_key": "legacy_29",
+                    "rule_mode": "legacy_29",
+                    "start_day": 29,
+                    "effective_from": "1900-01-01",
+                    "is_locked": True,
+                }
+            ]
+        return []
 
     @staticmethod
     def _pick_single_value(values: list[Any]) -> Any:
@@ -439,9 +473,26 @@ class ImportService:
         if not incoming["record_date"]:
             return False, "缺少 record_date", incoming
 
-        incoming["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
-            record_date=incoming["record_date"]
-        )
+        raw_cycle_code = str(
+            raw_record.get("settlement_cycle_code", incoming.get("settlement_cycle_code", "")) or ""
+        ).strip()
+        if raw_cycle_code:
+            incoming["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
+                cycle_code=raw_cycle_code
+            )
+        else:
+            incoming["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
+                record_date=incoming["record_date"]
+            )
+        rule_key_map = dict((master_context or {}).get("_settlement_cycle_rule_key_map", {}) or {})
+        raw_rule_key = str(
+            raw_record.get("settlement_cycle_rule_key", incoming.get("settlement_cycle_rule_key", "")) or ""
+        ).strip()
+        incoming["settlement_cycle_rule_key"] = str(rule_key_map.get(raw_rule_key, raw_rule_key) or "").strip()
+        if not incoming["settlement_cycle_rule_key"]:
+            incoming["settlement_cycle_rule_key"] = self.settlement_cycle_service.rule_key_for_date(
+                parse_date(incoming["record_date"])
+            )
         source_team_id = int(incoming.get("team_id", 0) or 0)
         source_manager_id = int(incoming.get("account_manager_id", 0) or 0)
         incoming["_source_team_id"] = source_team_id
@@ -630,10 +681,16 @@ class ImportService:
         existing_hash = str(existing.get("record_hash", ""))
         incoming_hash = str(incoming.get("record_hash", ""))
         if existing_hash == incoming_hash:
-            if self._dynamic_values_changed(int(existing.get("id", 0) or 0), incoming):
-                with self.record_repo.db.transaction() as conn:
-                    self._apply_dynamic_values(int(existing.get("id", 0) or 0), incoming, conn=conn)
-                return "updated", "动态字段已更新", 1
+            rule_snapshot_changed = str(existing.get("settlement_cycle_rule_key", "") or "") != str(
+                incoming.get("settlement_cycle_rule_key", "") or ""
+            )
+            if self._dynamic_values_changed(int(existing.get("id", 0) or 0), incoming) or rule_snapshot_changed:
+                if rule_snapshot_changed:
+                    self._apply_update(existing, incoming)
+                else:
+                    with self.record_repo.db.transaction() as conn:
+                        self._apply_dynamic_values(int(existing.get("id", 0) or 0), incoming, conn=conn)
+                return "updated", "动态字段或规则快照已更新", 1
             return "skipped", "同版本同内容，已跳过", 0
 
         if mode == "record_id":
@@ -651,6 +708,7 @@ class ImportService:
             "account_manager_id": incoming["account_manager_id"],
             "account_manager_name_snapshot": incoming["account_manager_name_snapshot"],
             "settlement_cycle_code": incoming["settlement_cycle_code"],
+            "settlement_cycle_rule_key": incoming.get("settlement_cycle_rule_key", ""),
             "business_key": incoming["business_key"],
             "remark": incoming.get("remark", ""),
             "version": incoming["version"],

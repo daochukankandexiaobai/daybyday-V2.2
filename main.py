@@ -73,7 +73,13 @@ def build_services(db_manager: DatabaseManager) -> dict:
         settlement_cycle_rule_repo,
         admin_action_log_service=admin_action_log_service,
     )
-    team_service = TeamService(team_repo, account_manager_repo, cycle_target_repo, settings_service)
+    team_service = TeamService(
+        team_repo,
+        account_manager_repo,
+        cycle_target_repo,
+        settings_service,
+        settlement_cycle_service=settlement_cycle_service,
+    )
     record_service = RecordService(
         record_repo=record_repo,
         team_repo=team_repo,

@@ -44,6 +44,7 @@ class SummaryService:
         crosses = self.settlement_cycle_service.range_crosses_cycles(parse_date(start_date), parse_date(end_date))
         include_progress = not crosses
         cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code if not crosses else ""
+        cycle_rule_key = self.settlement_cycle_service.rule_key_for_date(parse_date(start_date)) if not crosses else ""
 
         key_func_map = {
             "全公司": lambda x: "全公司",
@@ -67,7 +68,7 @@ class SummaryService:
             if include_progress and group_by == "团队":
                 team_id = team_id_map.get(key, 0)
                 if team_id > 0:
-                    target = self.cycle_target_repo.team_target_sum(team_id, cycle_code)
+                    target = self.cycle_target_repo.team_target_sum(team_id, cycle_code, cycle_rule_key)
             agg = self._aggregate_rows(bucket, target=target, include_progress=include_progress)
             result.append({"group_name": key, "cross_cycle": crosses, **agg})
 
@@ -82,10 +83,12 @@ class SummaryService:
         crosses = self.settlement_cycle_service.range_crosses_cycles(parse_date(start_date), parse_date(end_date))
         cycle_targets: list[dict] = []
         if not crosses:
-            cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code
+            start_obj = parse_date(start_date)
+            cycle_code = self.settlement_cycle_service.cycle_for_date(start_obj).code
+            cycle_rule_key = self.settlement_cycle_service.rule_key_for_date(start_obj)
             team_ids = sorted({int(x.get("team_id", 0) or 0) for x in rows if int(x.get("team_id", 0) or 0) > 0})
             for team_id in team_ids:
-                cycle_targets.extend(self.cycle_target_repo.list_targets(team_id, cycle_code))
+                cycle_targets.extend(self.cycle_target_repo.list_targets(team_id, cycle_code, cycle_rule_key))
 
         start_time = day_start_iso(parse_date(start_date))
         end_time = day_end_iso(parse_date(end_date))

@@ -6,6 +6,8 @@ from pathlib import Path
 from app.utils.qt_compat import Signal
 from app.utils.qt_compat import (
     QComboBox,
+    QDate,
+    QDateEdit,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -85,7 +87,7 @@ class SettingsTab(QWidget):
         self.cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
         self.cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
         self.cycle_start_day_spin = QSpinBox()
-        self.cycle_start_day_spin.setRange(1, 28)
+        self.cycle_start_day_spin.setRange(1, 29)
         self.cycle_start_day_spin.setValue(1)
         self.cycle_rule_status_label = QLabel("-")
         self.cycle_rule_preview_label = QLabel("-")
@@ -109,12 +111,43 @@ class SettingsTab(QWidget):
         cycle_hint.setWordWrap(True)
         cycle_hint.setObjectName("statusText")
 
+        self.future_cycle_mode_combo = QComboBox()
+        self.future_cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
+        self.future_cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
+        self.future_cycle_start_day_spin = QSpinBox()
+        self.future_cycle_start_day_spin.setRange(1, 28)
+        self.future_cycle_start_day_spin.setValue(1)
+        self.future_effective_date_edit = QDateEdit()
+        self.future_effective_date_edit.setCalendarPopup(True)
+        self.future_effective_date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.future_effective_date_edit.setDate(QDate.currentDate())
+        self.future_rule_preview_label = QLabel("-")
+        self.future_rule_preview_label.setWordWrap(True)
+        self.future_rule_history_label = QLabel("-")
+        self.future_rule_history_label.setWordWrap(True)
+        self.add_future_cycle_rule_btn = QPushButton("新增未来规则")
+        self.add_future_cycle_rule_btn.setProperty("buttonRole", "primary")
+        future_hint = QLabel(
+            "需要切换结算周期时，请新增一个未来生效规则。历史日报不会被重新归类；"
+            "导入旧 JSON 前可先排期新规则，导入文件中的历史规则会保留。"
+        )
+        future_hint.setWordWrap(True)
+        future_hint.setObjectName("statusText")
+
         cycle_layout.addRow("周期模式", self.cycle_mode_combo)
         cycle_layout.addRow("自定义起始日", self.cycle_start_day_spin)
         cycle_layout.addRow("当前状态", self.cycle_rule_status_label)
         cycle_layout.addRow("周期预览", self.cycle_rule_preview_label)
         cycle_layout.addRow(cycle_hint)
         cycle_layout.addRow(cycle_button_row)
+        cycle_layout.addRow(QLabel("后续规则（按生效日期）"))
+        cycle_layout.addRow("新周期模式", self.future_cycle_mode_combo)
+        cycle_layout.addRow("新周期起始日", self.future_cycle_start_day_spin)
+        cycle_layout.addRow("生效日期", self.future_effective_date_edit)
+        cycle_layout.addRow("新规则预览", self.future_rule_preview_label)
+        cycle_layout.addRow("规则时间线", self.future_rule_history_label)
+        cycle_layout.addRow(future_hint)
+        cycle_layout.addRow(self.add_future_cycle_rule_btn)
 
         info_group = QGroupBox("系统信息")
         info_layout = QFormLayout(info_group)
@@ -159,6 +192,10 @@ class SettingsTab(QWidget):
         self.cycle_start_day_spin.valueChanged.connect(self._refresh_cycle_rule_preview)
         self.save_cycle_rule_btn.clicked.connect(self.on_save_cycle_rule)
         self.lock_cycle_rule_btn.clicked.connect(self.on_lock_cycle_rule)
+        self.future_cycle_mode_combo.currentIndexChanged.connect(self.on_future_cycle_mode_changed)
+        self.future_cycle_start_day_spin.valueChanged.connect(self.on_future_cycle_start_day_changed)
+        self.future_effective_date_edit.dateChanged.connect(self._refresh_future_cycle_preview)
+        self.add_future_cycle_rule_btn.clicked.connect(self.on_add_future_cycle_rule)
 
     def load_settings(self) -> None:
         self.company_name_edit.setText(self.settings_service.get("company_name", "示例公司"))
@@ -189,6 +226,8 @@ class SettingsTab(QWidget):
         if mode == "legacy_29":
             self.cycle_mode_combo.clear()
             self.cycle_mode_combo.addItem("历史兼容：每月29日至次月28日", "legacy_29")
+            self.cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
+            self.cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
         elif self.cycle_mode_combo.count() == 1:
             self.cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
             self.cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
@@ -197,6 +236,7 @@ class SettingsTab(QWidget):
         self.cycle_mode_combo.blockSignals(True)
         self.cycle_mode_combo.setCurrentIndex(max(0, index))
         self.cycle_mode_combo.blockSignals(False)
+        self.cycle_start_day_spin.setMaximum(29 if mode == "legacy_29" else 28)
         self.cycle_start_day_spin.setValue(int(status.get("start_day", 1) or 1))
 
         locked = bool(status.get("is_locked", False))
@@ -215,6 +255,117 @@ class SettingsTab(QWidget):
         self.save_cycle_rule_btn.setEnabled(editable and mode != "legacy_29")
         self.lock_cycle_rule_btn.setEnabled(editable and mode != "legacy_29")
         self._refresh_cycle_rule_preview()
+        self._refresh_future_rule_controls(status)
+
+    def _refresh_future_rule_controls(self, status: dict) -> None:
+        if self.settlement_cycle_service is None:
+            return
+        latest_business_date = str(status.get("latest_business_date", "") or "")
+        if latest_business_date:
+            latest = QDate.fromString(latest_business_date, "yyyy-MM-dd")
+            if latest.isValid():
+                self.future_effective_date_edit.setMinimumDate(latest.addDays(1))
+        else:
+            self.future_effective_date_edit.setMinimumDate(QDate(1900, 1, 1))
+
+        rules = list(status.get("rules", []) or [])
+        lines = []
+        for item in rules:
+            effective_from = str(item.get("effective_from", "") or "")
+            label = str(item.get("rule_mode", "") or "")
+            start_day = int(item.get("start_day", 1) or 1)
+            if label == "calendar_month":
+                label = "自然月"
+            elif label == "fixed_start_day":
+                label = "每月{}日开始".format(start_day)
+            elif label == "legacy_29":
+                label = "历史兼容：29日至次月28日"
+            lines.append("{} 起：{}".format(effective_from, label))
+        self.future_rule_history_label.setText("； ".join(lines) if lines else "-")
+        self.on_future_cycle_mode_changed()
+
+    def on_future_cycle_mode_changed(self, *_args) -> None:
+        mode = str(self.future_cycle_mode_combo.currentData() or "calendar_month")
+        if mode == "calendar_month":
+            self.future_cycle_start_day_spin.setValue(1)
+        self.future_cycle_start_day_spin.setEnabled(mode == "fixed_start_day")
+        self._align_future_effective_date_to_start_day()
+        self._refresh_future_cycle_preview()
+
+    def _align_future_effective_date_to_start_day(self) -> None:
+        mode = str(self.future_cycle_mode_combo.currentData() or "calendar_month")
+        start_day = 1 if mode == "calendar_month" else int(self.future_cycle_start_day_spin.value())
+        current = self.future_effective_date_edit.date()
+        if not current.isValid():
+            current = QDate.currentDate()
+        day = min(start_day, current.daysInMonth())
+        aligned = QDate(current.year(), current.month(), day)
+        if aligned < self.future_effective_date_edit.minimumDate():
+            minimum = self.future_effective_date_edit.minimumDate()
+            day = min(start_day, minimum.daysInMonth())
+            aligned = QDate(minimum.year(), minimum.month(), day)
+            if aligned < minimum:
+                next_month = minimum.addMonths(1)
+                aligned = QDate(next_month.year(), next_month.month(), min(start_day, next_month.daysInMonth()))
+        self.future_effective_date_edit.blockSignals(True)
+        self.future_effective_date_edit.setDate(aligned)
+        self.future_effective_date_edit.blockSignals(False)
+
+    def on_future_cycle_start_day_changed(self, *_args) -> None:
+        self._align_future_effective_date_to_start_day()
+        self._refresh_future_cycle_preview()
+
+    def _refresh_future_cycle_preview(self, *_args) -> None:
+        mode = str(self.future_cycle_mode_combo.currentData() or "calendar_month")
+        start_day = 1 if mode == "calendar_month" else int(self.future_cycle_start_day_spin.value())
+        effective = self.future_effective_date_edit.date().toString("yyyy-MM-dd")
+        try:
+            from app.utils.date_utils import normalize_settlement_cycle_rule, settlement_cycle_for_date
+
+            candidate = normalize_settlement_cycle_rule({"rule_mode": mode, "start_day": start_day})
+            cycle = settlement_cycle_for_date(date.fromisoformat(effective), candidate)
+            self.future_rule_preview_label.setText(
+                "{} 生效后，第一个周期：{}（{} ~ {}）".format(
+                    effective,
+                    cycle.code,
+                    cycle.start.isoformat(),
+                    cycle.end_inclusive.isoformat(),
+                )
+            )
+        except (TypeError, ValueError):
+            self.future_rule_preview_label.setText("请输入有效的生效日期和周期起始日")
+
+    def on_add_future_cycle_rule(self) -> None:
+        if self.settlement_cycle_service is None:
+            return
+        mode = str(self.future_cycle_mode_combo.currentData() or "calendar_month")
+        start_day = 1 if mode == "calendar_month" else int(self.future_cycle_start_day_spin.value())
+        effective_from = self.future_effective_date_edit.date().toString("yyyy-MM-dd")
+        mode_label = "自然月" if mode == "calendar_month" else "每月{}日开始".format(start_day)
+        answer = QMessageBox.question(
+            self,
+            "确认新增未来规则",
+            "将从 {} 起使用{}。\n\n"
+            "历史日报、历史周目标和历史统计不会被重新归类。\n"
+            "请确认该日期是新周期的第一个工作周期边界。".format(effective_from, mode_label),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        ok, message, _status = self.settlement_cycle_service.schedule_successor_rule(
+            rule_mode=mode,
+            start_day=start_day,
+            effective_from=effective_from,
+            operator=self._operator(),
+        )
+        if not ok:
+            QMessageBox.warning(self, "无法新增", message)
+            self._load_cycle_rule()
+            return
+        QMessageBox.information(self, "提示", message)
+        self._load_cycle_rule()
+        self.settlement_cycle_rule_changed.emit()
 
     def on_cycle_mode_changed(self, *_args) -> None:
         mode = str(self.cycle_mode_combo.currentData() or "calendar_month")
@@ -361,3 +512,5 @@ class SettingsTab(QWidget):
         ]:
             edit.setMinimumHeight(max(20, int(round(30 * factor))))
         self.cycle_start_day_spin.setMinimumHeight(max(20, int(round(30 * factor))))
+        self.future_cycle_start_day_spin.setMinimumHeight(max(20, int(round(30 * factor))))
+        self.future_effective_date_edit.setMinimumHeight(max(20, int(round(30 * factor))))

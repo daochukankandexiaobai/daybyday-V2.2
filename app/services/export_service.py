@@ -110,6 +110,7 @@ class ExportService:
                 "cycle_end": cycle.end_inclusive.isoformat(),
                 "cross_cycle": bool(dataset["cross_cycle"]),
                 "cycle_codes_in_range": dataset["cycle_codes"],
+                "rule_history": self.settlement_cycle_service.get_rule_history_for_export(),
             },
             "records": [self._record_for_export(item, export_field_defs) for item in rows],
             "summary": dataset["summary"],
@@ -338,10 +339,18 @@ class ExportService:
             payload[field_key] = record.get(storage_column, record.get(field_key))
 
         record_date = str(payload.get("record_date", "") or "").strip()
-        if record_date:
+        stored_cycle_code = str(record.get("settlement_cycle_code", "") or payload.get("settlement_cycle_code", "")).strip()
+        if stored_cycle_code:
+            payload["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
+                cycle_code=stored_cycle_code,
+            )
+        elif record_date:
             payload["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(record_date=record_date)
         else:
-            payload["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
-                cycle_code=str(payload.get("settlement_cycle_code", "")),
-            )
+            payload["settlement_cycle_code"] = ""
+
+        stored_rule_key = str(record.get("settlement_cycle_rule_key", "") or "").strip()
+        if not stored_rule_key and record_date:
+            stored_rule_key = self.settlement_cycle_service.rule_key_for_date(parse_date(record_date))
+        payload["settlement_cycle_rule_key"] = stored_rule_key
         return payload

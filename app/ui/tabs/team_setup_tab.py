@@ -328,6 +328,11 @@ class TeamSetupTab(QWidget):
             cycle = self.settlement_cycle_service.cycle_for_date(self.cycle_base_date.date().toPython())
         return cycle.code
 
+    def _cycle_rule_key(self) -> str:
+        if self.settlement_cycle_service is None:
+            return ""
+        return self.settlement_cycle_service.rule_key_for_date(self.cycle_base_date.date().toPython())
+
     def _set_mode(self, is_new: bool) -> None:
         self._is_new_team_mode = is_new
         self.mode_label.setText("新建模式" if is_new else "编辑模式")
@@ -571,6 +576,7 @@ class TeamSetupTab(QWidget):
             weekly_target_service=self.weekly_target_service,
             team_id=team_id,
             settlement_cycle_code=self._cycle_code(),
+            settlement_cycle_rule_key=self._cycle_rule_key(),
             parent=self,
         )
         dialog.targets_saved.connect(self.refresh_cycle_related)
@@ -682,6 +688,7 @@ class TeamSetupTab(QWidget):
         target_rows = self.weekly_target_service.get_account_manager_cycle_targets(
             team_id=int(self.current_team_id or 0),
             settlement_cycle_code=cycle_code,
+            settlement_cycle_rule_key=self._cycle_rule_key(),
         )
         return [
             {

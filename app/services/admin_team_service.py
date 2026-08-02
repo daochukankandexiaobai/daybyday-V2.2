@@ -37,6 +37,7 @@ class AdminTeamService:
         settlement_cycle_code: str,
         members: list[dict[str, Any]],
         operator: str,
+        settlement_cycle_rule_key: str = "",
     ) -> tuple[bool, str, int | None]:
         before = None
         if team_id:
@@ -57,6 +58,7 @@ class AdminTeamService:
             team_manager_name=team_manager_name,
             settlement_cycle_code=settlement_cycle_code,
             members=members,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
         )
         if not ok or not saved_team_id:
             return ok, message, saved_team_id

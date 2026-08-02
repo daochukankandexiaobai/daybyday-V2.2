@@ -135,6 +135,11 @@ class AdminTeamManageTab(QWidget):
             return self.settlement_cycle_service.cycle_for_date(base_date).code
         return settlement_cycle_for_date(base_date).code
 
+    def _cycle_rule_key(self) -> str:
+        if self.settlement_cycle_service is None:
+            return ""
+        return self.settlement_cycle_service.rule_key_for_date(self.base_date.date().toPython())
+
     def _set_current_state(self, team: dict | None) -> None:
         if not team:
             self.current_state_label.setText("新建")
@@ -217,7 +222,11 @@ class AdminTeamManageTab(QWidget):
         if not self.current_team_id:
             return
 
-        members = self.team_service.list_members_with_targets(self.current_team_id, cycle_code)
+        members = self.team_service.list_members_with_targets(
+            self.current_team_id,
+            cycle_code,
+            self._cycle_rule_key(),
+        )
         self.member_table.setRowCount(len(members))
         for row_idx, row in enumerate(members):
             self.member_table.setItem(row_idx, 0, QTableWidgetItem(str(row.get("account_manager_name", ""))))
@@ -298,6 +307,7 @@ class AdminTeamManageTab(QWidget):
             settlement_cycle_code=self._cycle_code(),
             members=members,
             operator=self._operator(),
+            settlement_cycle_rule_key=self._cycle_rule_key(),
         )
         if not ok:
             QMessageBox.warning(self, "保存失败", msg)

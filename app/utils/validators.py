@@ -156,6 +156,7 @@ def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
             or ""
         ).strip(),
         "settlement_cycle_code": str(record.get("settlement_cycle_code", "")).strip(),
+        "settlement_cycle_rule_key": str(record.get("settlement_cycle_rule_key", "")).strip(),
         "remark": str(record.get("remark", "")),
         "version": max(1, safe_int(record.get("version", 1))),
         "created_at": str(record.get("created_at", "")).strip(),

@@ -2,14 +2,32 @@
 
 from app.utils.date_utils import now_iso
 from app.utils.validators import safe_decimal, validate_non_negative_decimal_input
+from app.db.repositories import SettlementCycleRuleRepository
+from app.services.settlement_cycle_service import SettlementCycleService
 
 
 class TeamService:
-    def __init__(self, team_repo, account_manager_repo, cycle_target_repo, settings_service) -> None:
+    def __init__(
+        self,
+        team_repo,
+        account_manager_repo,
+        cycle_target_repo,
+        settings_service,
+        settlement_cycle_service=None,
+    ) -> None:
         self.team_repo = team_repo
         self.account_manager_repo = account_manager_repo
         self.cycle_target_repo = cycle_target_repo
         self.settings_service = settings_service
+        self.settlement_cycle_service = settlement_cycle_service or SettlementCycleService(
+            SettlementCycleRuleRepository(cycle_target_repo.db)
+        )
+
+    def _resolve_cycle_rule_key(self, settlement_cycle_rule_key: str = "") -> str:
+        key = str(settlement_cycle_rule_key or "").strip()
+        if key:
+            return key
+        return str(self.settlement_cycle_service.get_active_rule().rule_key or "")
 
     def list_teams(self, include_inactive: bool = False, only_inactive: bool = False) -> list[dict]:
         return self.team_repo.list_teams(include_inactive=include_inactive, only_inactive=only_inactive)
@@ -45,9 +63,18 @@ class TeamService:
     def get_team(self, team_id: int) -> dict | None:
         return self.team_repo.get_by_id(team_id, include_inactive=False)
 
-    def list_members_with_targets(self, team_id: int, settlement_cycle_code: str) -> list[dict]:
+    def list_members_with_targets(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> list[dict]:
         members = self.account_manager_repo.list_by_team(team_id)
-        target_rows = self.cycle_target_repo.list_targets(team_id, settlement_cycle_code)
+        target_rows = self.cycle_target_repo.list_targets(
+            team_id,
+            settlement_cycle_code,
+            self._resolve_cycle_rule_key(settlement_cycle_rule_key),
+        )
         target_map = {int(x["account_manager_id"]): float(x["target_amount"] or 0.0) for x in target_rows}
 
         result = []
@@ -72,6 +99,7 @@ class TeamService:
         settlement_cycle_code: str,
         members: list[dict],
         sync_cycle_targets: bool = True,
+        settlement_cycle_rule_key: str = "",
     ) -> tuple[bool, str, int | None]:
         region = region.strip()
         team_name = team_name.strip()
@@ -109,6 +137,7 @@ class TeamService:
             return False, "客户经理名单不能为空", None
 
         now = now_iso()
+        resolved_rule_key = self._resolve_cycle_rule_key(settlement_cycle_rule_key)
         saved_team_id = self.team_repo.save_team(team_id, region, team_name, team_manager_name, now)
 
         keep_ids: list[int] = []
@@ -123,6 +152,7 @@ class TeamService:
                     settlement_cycle_code=settlement_cycle_code,
                     target_amount=safe_decimal(item.get("target_amount", 0)),
                     now=now,
+                    settlement_cycle_rule_key=resolved_rule_key,
                 )
 
         self.account_manager_repo.deactivate_missing(saved_team_id, keep_ids=keep_ids, now=now)

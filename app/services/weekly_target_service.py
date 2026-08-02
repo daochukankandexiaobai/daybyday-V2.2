@@ -28,8 +28,20 @@ class WeeklyTargetService:
             SettlementCycleRuleRepository(weekly_target_repo.db)
         )
 
-    def get_cycle_weeks(self, settlement_cycle_code: str) -> list[dict[str, Any]]:
-        cycle = self.settlement_cycle_service.cycle_from_code(str(settlement_cycle_code or "").strip())
+    def _resolve_rule_key(self, settlement_cycle_rule_key: str = "") -> str:
+        key = str(settlement_cycle_rule_key or "").strip()
+        return key or self.settlement_cycle_service.get_active_rule().rule_key
+
+    def get_cycle_weeks(
+        self,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> list[dict[str, Any]]:
+        rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
+        cycle = self.settlement_cycle_service.cycle_from_code(
+            str(settlement_cycle_code or "").strip(),
+            rule_key=rule_key,
+        )
         weeks: list[dict[str, Any]] = []
         for segment in self.settlement_cycle_service.cycle_week_segments(cycle):
             week_index = safe_int(segment.get("index"))
@@ -44,23 +56,36 @@ class WeeklyTargetService:
         return weeks
 
     def get_cycle_weeks_by_date(self, record_date: str) -> dict[str, Any]:
-        cycle = self.settlement_cycle_service.cycle_for_date(parse_date(str(record_date or "").strip()))
+        record_date_obj = parse_date(str(record_date or "").strip())
+        cycle = self.settlement_cycle_service.cycle_for_date(record_date_obj)
+        rule_key = self.settlement_cycle_service.rule_key_for_date(record_date_obj)
         return {
             "settlement_cycle_code": cycle.code,
+            "settlement_cycle_rule_key": rule_key,
             "cycle_start_date": cycle.start.isoformat(),
             "cycle_end_date": cycle.end_inclusive.isoformat(),
-            "weeks": self.get_cycle_weeks(cycle.code),
+            "weeks": self.get_cycle_weeks(cycle.code, rule_key),
         }
 
-    def get_cycle_matrix_for_team(self, team_id: int, settlement_cycle_code: str) -> dict[str, Any]:
+    def get_cycle_matrix_for_team(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> dict[str, Any]:
         team_id = int(team_id or 0)
         settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         team = self.team_repo.get_by_id(team_id, include_inactive=True)
         members = self.account_manager_repo.list_by_team(team_id)
-        weeks = self.get_cycle_weeks(settlement_cycle_code)
+        weeks = self.get_cycle_weeks(settlement_cycle_code, settlement_cycle_rule_key)
         week_map = {int(item["week_index"]): item for item in weeks}
 
-        saved_rows = self.weekly_target_repo.list_targets_for_team_cycle(team_id, settlement_cycle_code)
+        saved_rows = self.weekly_target_repo.list_targets_for_team_cycle(
+            team_id,
+            settlement_cycle_code,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
+        )
         target_map: dict[tuple[int, int], dict[str, Any]] = {}
         for row in saved_rows:
             key = (int(row.get("account_manager_id", 0) or 0), int(row.get("week_index", 0) or 0))
@@ -109,9 +134,14 @@ class WeeklyTargetService:
             "team_id": team_id,
             "team": team or {},
             "settlement_cycle_code": settlement_cycle_code,
+            "settlement_cycle_rule_key": settlement_cycle_rule_key,
             "weeks": weeks,
             "rows": rows,
-            "team_totals": self.get_team_cycle_targets(team_id, settlement_cycle_code),
+            "team_totals": self.get_team_cycle_targets(
+                team_id,
+                settlement_cycle_code,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
+            ),
         }
 
     def get_week_targets_for_team(
@@ -119,15 +149,17 @@ class WeeklyTargetService:
         team_id: int,
         settlement_cycle_code: str,
         week_index: int,
+        settlement_cycle_rule_key: str = "",
     ) -> dict[str, Any]:
         team_id = int(team_id or 0)
         settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         week_index = safe_int(week_index)
         team = self.team_repo.get_by_id(team_id, include_inactive=True)
         if team is None:
             raise ValueError("团队不存在")
 
-        weeks = self.get_cycle_weeks(settlement_cycle_code)
+        weeks = self.get_cycle_weeks(settlement_cycle_code, settlement_cycle_rule_key)
         week_map = {int(item["week_index"]): item for item in weeks}
         if week_index not in week_map:
             raise ValueError(f"无效周次: {week_index}")
@@ -137,6 +169,7 @@ class WeeklyTargetService:
             team_id=team_id,
             settlement_cycle_code=settlement_cycle_code,
             week_index=week_index,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
         )
         target_map = {int(row.get("account_manager_id", 0) or 0): row for row in saved_rows}
 
@@ -162,6 +195,7 @@ class WeeklyTargetService:
             "team_id": team_id,
             "team": team,
             "settlement_cycle_code": settlement_cycle_code,
+            "settlement_cycle_rule_key": settlement_cycle_rule_key,
             "weeks": weeks,
             "selected_week": week_map[week_index],
             "rows": rows,
@@ -173,9 +207,11 @@ class WeeklyTargetService:
         settlement_cycle_code: str,
         week_index: int,
         rows: list[dict[str, Any]],
+        settlement_cycle_rule_key: str = "",
     ) -> dict[str, Any]:
         team_id = int(team_id or 0)
         settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         week_index = safe_int(week_index)
         if team_id <= 0:
             raise ValueError("team_id 不能为空")
@@ -186,7 +222,7 @@ class WeeklyTargetService:
         if team is None:
             raise ValueError("团队不存在")
 
-        weeks = self.get_cycle_weeks(settlement_cycle_code)
+        weeks = self.get_cycle_weeks(settlement_cycle_code, settlement_cycle_rule_key)
         week_map = {int(item["week_index"]): item for item in weeks}
         if week_index not in week_map:
             raise ValueError(f"无效周次: {week_index}")
@@ -209,16 +245,29 @@ class WeeklyTargetService:
                 rows=normalized_rows,
                 now=now,
                 conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
             )
-            self._sync_cycle_targets_from_repo(team_id, settlement_cycle_code, member_ids, now, conn=conn)
+            self._sync_cycle_targets_from_repo(
+                team_id,
+                settlement_cycle_code,
+                member_ids,
+                now,
+                conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
+            )
         return {
             "ok": True,
             "saved_count": saved_count,
             "manager_count": len(member_ids),
             "settlement_cycle_code": settlement_cycle_code,
+            "settlement_cycle_rule_key": settlement_cycle_rule_key,
             "week_index": week_index,
-            "account_manager_cycle_targets": self.get_account_manager_cycle_targets(team_id, settlement_cycle_code),
-            "team_cycle_targets": self.get_team_cycle_targets(team_id, settlement_cycle_code),
+            "account_manager_cycle_targets": self.get_account_manager_cycle_targets(
+                team_id, settlement_cycle_code, settlement_cycle_rule_key=settlement_cycle_rule_key
+            ),
+            "team_cycle_targets": self.get_team_cycle_targets(
+                team_id, settlement_cycle_code, settlement_cycle_rule_key=settlement_cycle_rule_key
+            ),
         }
 
     def save_cycle_matrix_for_team(
@@ -226,9 +275,11 @@ class WeeklyTargetService:
         team_id: int,
         settlement_cycle_code: str,
         rows: list[dict[str, Any]],
+        settlement_cycle_rule_key: str = "",
     ) -> dict[str, Any]:
         team_id = int(team_id or 0)
         settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         if team_id <= 0:
             raise ValueError("team_id 不能为空")
         if not settlement_cycle_code:
@@ -238,7 +289,7 @@ class WeeklyTargetService:
         if team is None:
             raise ValueError("团队不存在")
 
-        weeks = self.get_cycle_weeks(settlement_cycle_code)
+        weeks = self.get_cycle_weeks(settlement_cycle_code, settlement_cycle_rule_key)
         week_map = {int(item["week_index"]): item for item in weeks}
         members = self.account_manager_repo.list_by_team(team_id)
         member_ids = {int(item["id"]) for item in members}
@@ -252,23 +303,47 @@ class WeeklyTargetService:
                 rows=normalized_rows,
                 now=now,
                 conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
             )
-            self._sync_cycle_targets(team_id, settlement_cycle_code, member_ids, normalized_rows, now, conn=conn)
+            self._sync_cycle_targets(
+                team_id,
+                settlement_cycle_code,
+                member_ids,
+                normalized_rows,
+                now,
+                conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
+            )
 
         return {
             "ok": True,
             "saved_count": saved_count,
             "manager_count": len(member_ids),
             "settlement_cycle_code": settlement_cycle_code,
-            "account_manager_cycle_targets": self.get_account_manager_cycle_targets(team_id, settlement_cycle_code),
-            "team_cycle_targets": self.get_team_cycle_targets(team_id, settlement_cycle_code),
+            "settlement_cycle_rule_key": settlement_cycle_rule_key,
+            "account_manager_cycle_targets": self.get_account_manager_cycle_targets(
+                team_id, settlement_cycle_code, settlement_cycle_rule_key=settlement_cycle_rule_key
+            ),
+            "team_cycle_targets": self.get_team_cycle_targets(
+                team_id, settlement_cycle_code, settlement_cycle_rule_key=settlement_cycle_rule_key
+            ),
         }
 
-    def get_account_manager_cycle_targets(self, team_id: int, settlement_cycle_code: str) -> list[dict[str, Any]]:
+    def get_account_manager_cycle_targets(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> list[dict[str, Any]]:
         team_id = int(team_id or 0)
         settlement_cycle_code = str(settlement_cycle_code or "").strip()
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         members = self.account_manager_repo.list_by_team(team_id)
-        sums = self.weekly_target_repo.sum_targets_by_manager(team_id, settlement_cycle_code)
+        sums = self.weekly_target_repo.sum_targets_by_manager(
+            team_id,
+            settlement_cycle_code,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
+        )
 
         result: list[dict[str, Any]] = []
         for member in members:
@@ -280,6 +355,7 @@ class WeeklyTargetService:
                     "account_manager_id": manager_id,
                     "account_manager_name": member.get("account_manager_name", ""),
                     "settlement_cycle_code": settlement_cycle_code,
+                    "settlement_cycle_rule_key": settlement_cycle_rule_key,
                     "visit_target": safe_int(row.get("visit_target")),
                     "quality_visit_target": safe_int(row.get("quality_visit_target")),
                     "repayment_target": safe_decimal(row.get("repayment_target")),
@@ -287,14 +363,22 @@ class WeeklyTargetService:
             )
         return result
 
-    def get_team_cycle_targets(self, team_id: int, settlement_cycle_code: str) -> dict[str, Any]:
+    def get_team_cycle_targets(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> dict[str, Any]:
+        settlement_cycle_rule_key = self._resolve_rule_key(settlement_cycle_rule_key)
         row = self.weekly_target_repo.sum_targets_for_team(
             int(team_id or 0),
             str(settlement_cycle_code or "").strip(),
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
         )
         return {
             "team_id": int(team_id or 0),
             "settlement_cycle_code": str(settlement_cycle_code or "").strip(),
+            "settlement_cycle_rule_key": settlement_cycle_rule_key,
             "visit_target": safe_int(row.get("visit_target")),
             "quality_visit_target": safe_int(row.get("quality_visit_target")),
             "repayment_target": safe_decimal(row.get("repayment_target")),
@@ -354,6 +438,7 @@ class WeeklyTargetService:
         rows: list[dict[str, Any]],
         now: str,
         conn=None,
+        settlement_cycle_rule_key: str = "",
     ) -> None:
         repayment_by_manager = {manager_id: 0.0 for manager_id in member_ids}
         for row in rows:
@@ -369,6 +454,7 @@ class WeeklyTargetService:
                 target_amount=target_amount,
                 now=now,
                 conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
             )
 
     def _sync_cycle_targets_from_repo(
@@ -378,8 +464,14 @@ class WeeklyTargetService:
         member_ids: set[int],
         now: str,
         conn=None,
+        settlement_cycle_rule_key: str = "",
     ) -> None:
-        sums = self.weekly_target_repo.sum_targets_by_manager(team_id, settlement_cycle_code, conn=conn)
+        sums = self.weekly_target_repo.sum_targets_by_manager(
+            team_id,
+            settlement_cycle_code,
+            conn=conn,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
+        )
         for manager_id in member_ids:
             target_amount = safe_decimal(sums.get(manager_id, {}).get("repayment_target"))
             self.cycle_target_repo.upsert_target(
@@ -389,4 +481,5 @@ class WeeklyTargetService:
                 target_amount=target_amount,
                 now=now,
                 conn=conn,
+                settlement_cycle_rule_key=settlement_cycle_rule_key,
             )

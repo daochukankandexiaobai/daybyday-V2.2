@@ -134,10 +134,10 @@ def main():
             conn.execute(
                 """
                 INSERT INTO cycle_targets (
-                    team_id, account_manager_id, settlement_cycle_code,
+                    team_id, account_manager_id, settlement_cycle_code, settlement_cycle_rule_key,
                     target_amount, created_at, updated_at
                 )
-                VALUES (1, 101, ?, 1000, ?, ?)
+                VALUES (1, 101, ?, 'initial_calendar_month', 1000, ?, ?)
                 """,
                 (cycle.code, now, now),
             )

@@ -49,10 +49,11 @@ class TargetAlertService:
     ) -> dict[str, dict[str, dict[str, Any]]]:
         week = self.settlement_cycle_service.cycle_week_for_date(parse_date(record_date))
         cycle_code = str(week.get("cycle_code", ""))
+        rule_key = str(week.get("cycle_rule_key", ""))
         week_index = int(week.get("week_index", 0) or 0)
         week_start = str(week.get("week_start", ""))
         week_end = str(week.get("week_end", ""))
-        target_map = self._weekly_targets_for_team(team_id, cycle_code)
+        target_map = self._weekly_targets_for_team(team_id, cycle_code, rule_key)
 
         result: dict[str, dict[str, dict[str, Any]]] = {}
         for manager_id in account_manager_ids:
@@ -200,6 +201,7 @@ class TargetAlertService:
     ) -> dict[str, dict[str, dict[str, Any]]]:
         week = self.settlement_cycle_service.cycle_week_for_date(parse_date(start_date))
         cycle_code = str(week.get("cycle_code", ""))
+        rule_key = str(week.get("cycle_rule_key", ""))
         week_index = int(week.get("week_index", 0) or 0)
 
         target_cache: dict[int, dict[int, dict[str, Any]]] = {}
@@ -210,7 +212,7 @@ class TargetAlertService:
             if team_id <= 0 or manager_id <= 0:
                 continue
             if team_id not in target_cache:
-                target_cache[team_id] = self._weekly_targets_for_team(team_id, cycle_code)
+                target_cache[team_id] = self._weekly_targets_for_team(team_id, cycle_code, rule_key)
             week_targets = target_cache[team_id].get(manager_id, {}).get("weeks", {}).get(week_index, {})
             statuses: dict[str, dict[str, Any]] = {}
             for field_key, (target_key, _actual_key) in self.SUMMARY_FIELD_MAP.items():
@@ -226,7 +228,9 @@ class TargetAlertService:
         start_date: str,
         rows: list[dict[str, Any]],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code
+        start_obj = parse_date(start_date)
+        cycle_code = self.settlement_cycle_service.cycle_for_date(start_obj).code
+        rule_key = self.settlement_cycle_service.rule_key_for_date(start_obj)
         target_cache: dict[int, dict[int, dict[str, Any]]] = {}
         result: dict[str, dict[str, dict[str, Any]]] = {}
         for row in rows:
@@ -235,7 +239,7 @@ class TargetAlertService:
             if team_id <= 0 or manager_id <= 0:
                 continue
             if team_id not in target_cache:
-                target_cache[team_id] = self._weekly_targets_for_team(team_id, cycle_code)
+                target_cache[team_id] = self._weekly_targets_for_team(team_id, cycle_code, rule_key)
             cycle_targets = target_cache[team_id].get(manager_id, {}).get("cycle", {})
             statuses: dict[str, dict[str, Any]] = {}
             for field_key, (target_key, _actual_key) in self.SUMMARY_FIELD_MAP.items():
@@ -246,8 +250,17 @@ class TargetAlertService:
             result[self.row_key(team_id, manager_id)] = statuses
         return result
 
-    def _weekly_targets_for_team(self, team_id: int, settlement_cycle_code: str) -> dict[int, dict[str, Any]]:
-        matrix = self.weekly_target_service.get_cycle_matrix_for_team(team_id, settlement_cycle_code)
+    def _weekly_targets_for_team(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        settlement_cycle_rule_key: str = "",
+    ) -> dict[int, dict[str, Any]]:
+        matrix = self.weekly_target_service.get_cycle_matrix_for_team(
+            team_id,
+            settlement_cycle_code,
+            settlement_cycle_rule_key=settlement_cycle_rule_key,
+        )
         result: dict[int, dict[str, Any]] = {}
         for row in matrix.get("rows", []):
             manager_id = int(row.get("account_manager_id", 0) or 0)
