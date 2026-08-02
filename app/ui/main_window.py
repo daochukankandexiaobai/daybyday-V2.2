@@ -52,7 +52,7 @@ class MainWindow(QMainWindow):
         self.ui_adaptive = UIAdaptiveCoordinator(self)
         self._layout_profile: LayoutProfile | None = None
 
-        self.setWindowTitle("团队经理日报管理系统 V2.3.1 -win7")
+        self.setWindowTitle("day by day V2.2.3")
         self.resize(1420, 900)
         self.setProperty("_view_scale_factor", float(self.services["settings_service"].get_view_scale_factor() or 1.0))
 

@@ -82,7 +82,8 @@ def _test_packaging_files():
     _assert_contains(BASE_DIR / "scripts/build_win7_dist.ps1", "python.exe")
     _assert_contains(BASE_DIR / "scripts/build_win7_dist.ps1", "-m PyInstaller")
     _assert_contains(BASE_DIR / "scripts/build_win7_dist.ps1", "--clean")
-    _assert_contains(BASE_DIR / "installer/TeamReportAppWin7.iss", "TeamReportAppWin7.exe")
+    _assert_contains(BASE_DIR / "installer/TeamReportAppWin7.iss", "day by day.exe")
+    _assert_contains(BASE_DIR / "installer/TeamReportAppWin7.iss", "day by day V2.2.3")
     _assert_contains(BASE_DIR / "installer/TeamReportAppWin7.iss", "OutputDir=..\\installer_output")
     _assert_contains(BASE_DIR / "docs/deploy_win7.md", ".\\scripts\\build_win7_dist.ps1")
 

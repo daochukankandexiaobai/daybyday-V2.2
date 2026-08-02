@@ -15,7 +15,7 @@ if ([string]::IsNullOrWhiteSpace($DistPath)) {
     $DistPath = Join-Path $ProjectRoot "dist"
 }
 
-$WorkPath = Join-Path $ProjectRoot "build\TeamReportAppWin7"
+$WorkPath = Join-Path $ProjectRoot "build\day_by_day"
 
 Push-Location $ProjectRoot
 try {
@@ -33,7 +33,7 @@ finally {
     Pop-Location
 }
 
-$ExePath = Join-Path $DistPath "TeamReportAppWin7\TeamReportAppWin7.exe"
+$ExePath = Join-Path $DistPath "day by day\day by day.exe"
 if (-not (Test-Path -LiteralPath $ExePath)) {
     throw "Build output was not found: $ExePath"
 }

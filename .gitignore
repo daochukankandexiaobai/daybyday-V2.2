@@ -32,6 +32,7 @@ tmp_exports/
 # Build outputs
 build/
 dist/
+installer_output/
 *.egg-info/
 
 # PyInstaller local artifacts

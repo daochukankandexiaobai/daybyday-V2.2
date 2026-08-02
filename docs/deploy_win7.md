@@ -26,10 +26,10 @@ pip install -r requirements-dev.txt
 .\scripts\build_win7_dist.ps1
 ```
 
-输出目录：`dist\TeamReportAppWin7\`
+输出目录：`dist\day by day\`
 
 ## 4. 首次启动说明
-1. 双击 `TeamReportAppWin7.exe`
+1. 双击 `day by day.exe`
 2. 程序会自动初始化数据库（`data\team_report.db`）
 3. 默认管理员账号：
    - 用户名：`admin`
@@ -42,7 +42,7 @@ pip install -r requirements-dev.txt
 - 检查 VC++ 运行库是否安装
 - 在命令行启动查看日志：
   ```powershell
-  TeamReportAppWin7.exe
+  day by day.exe
   ```
 - 查看日志文件：`logs\app.log`、`logs\error_YYYYMMDD.log`
 

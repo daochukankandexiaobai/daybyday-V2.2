@@ -71,7 +71,7 @@ python main.py
 .\scripts\build_win7_dist.ps1
 ```
 
-输出：`dist\TeamReportAppWin7\`
+输出：`dist\day by day\`
 
 ## 12. Win7 部署文档
 详见：
