@@ -8,11 +8,11 @@ from pathlib import Path
 from types import TracebackType
 
 from app.utils.qt_compat import QApplication, QMessageBox
+from app.utils.paths import app_data_dir
 
 
 def _logs_dir() -> Path:
-    base_dir = Path(__file__).resolve().parents[2]
-    log_dir = base_dir / "logs"
+    log_dir = app_data_dir("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 

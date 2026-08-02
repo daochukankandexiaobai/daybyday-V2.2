@@ -3,13 +3,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from app.utils.paths import app_data_dir
+
 
 APP_LOGGER_NAME = "team_report_app"
 
 
 def _logs_dir() -> Path:
-    base_dir = Path(__file__).resolve().parents[2]
-    log_dir = base_dir / "logs"
+    log_dir = app_data_dir("logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
 
