@@ -22,8 +22,12 @@ env/
 data/
 logs/
 exports/
+backups/
 tmp/
 tmp_exports/
+*.db-journal
+*.db-shm
+*.db-wal
 
 # Build outputs
 build/

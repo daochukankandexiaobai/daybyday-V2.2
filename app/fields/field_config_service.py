@@ -48,3 +48,25 @@ def bootstrap_default_field_config(conn: sqlite3.Connection) -> Dict[str, Any]:
     repository = FieldConfigRepository(conn)
     service = FieldConfigService(repository)
     return service.bootstrap_defaults()
+
+
+def repair_missing_system_formula_ids(conn: sqlite3.Connection) -> int:
+    """Restore only blank built-in formula ids without overwriting admin settings."""
+    repaired = 0
+    now = _now_str()
+    for row in build_default_field_rows():
+        formula_id = str(row.get("formula_id", "") or "").strip()
+        if not formula_id:
+            continue
+        cursor = conn.execute(
+            """
+            UPDATE field_definitions
+            SET formula_id = ?, updated_at = ?
+            WHERE field_key = ?
+              AND system_field = 1
+              AND (formula_id IS NULL OR formula_id = '')
+            """,
+            (formula_id, now, row["field_key"]),
+        )
+        repaired += int(cursor.rowcount or 0)
+    return repaired

@@ -20,15 +20,13 @@ from app.utils.qt_compat import (
     QWidget,
 )
 
-from app.utils.date_utils import resolve_report_range
-
-
 class SummaryTab(QWidget):
     def __init__(self, summary_service, excel_service, settings_service, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.summary_service = summary_service
         self.excel_service = excel_service
         self.settings_service = settings_service
+        self.settlement_cycle_service = summary_service.settlement_cycle_service
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -114,14 +112,16 @@ class SummaryTab(QWidget):
         mode = self.mode_combo.currentText()
         try:
             if mode == "自定义":
-                start, end = resolve_report_range(
+                start, end = self.settlement_cycle_service.resolve_report_range(
                     mode,
                     self.base_date.date().toPython(),
                     self.custom_start.date().toPython(),
                     self.custom_end.date().toPython(),
                 )
             else:
-                start, end = resolve_report_range(mode, self.base_date.date().toPython())
+                start, end = self.settlement_cycle_service.resolve_report_range(
+                    mode, self.base_date.date().toPython()
+                )
             return start.isoformat(), end.isoformat()
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, "提示", str(exc))

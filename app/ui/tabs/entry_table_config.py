@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 from app.config.field_profiles import PROFILE_ENTRY_INPUT, get_profile_field_keys
 from app.config.field_registry import DATA_TYPE_AMOUNT, DATA_TYPE_INT, get_field_spec

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.utils.date_utils import cycle_week_for_date, parse_date, settlement_cycle_for_date
+from app.db.repositories import SettlementCycleRuleRepository
+from app.services.settlement_cycle_service import SettlementCycleService
+from app.utils.date_utils import parse_date
 
 
 class TargetAlertService:
@@ -27,10 +29,13 @@ class TargetAlertService:
         "repayment_amount": ("repayment_target", "repayment_amount_daily"),
     }
 
-    def __init__(self, record_repo, weekly_target_service, target_progress_service) -> None:
+    def __init__(self, record_repo, weekly_target_service, target_progress_service, settlement_cycle_service=None) -> None:
         self.record_repo = record_repo
         self.weekly_target_service = weekly_target_service
         self.target_progress_service = target_progress_service
+        self.settlement_cycle_service = settlement_cycle_service or SettlementCycleService(
+            SettlementCycleRuleRepository(record_repo.db)
+        )
 
     @staticmethod
     def row_key(team_id: int, account_manager_id: int) -> str:
@@ -42,7 +47,7 @@ class TargetAlertService:
         record_date: str,
         account_manager_ids: list[int],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        week = cycle_week_for_date(parse_date(record_date))
+        week = self.settlement_cycle_service.cycle_week_for_date(parse_date(record_date))
         cycle_code = str(week.get("cycle_code", ""))
         week_index = int(week.get("week_index", 0) or 0)
         week_start = str(week.get("week_start", ""))
@@ -193,7 +198,7 @@ class TargetAlertService:
         end_date: str,
         rows: list[dict[str, Any]],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        week = cycle_week_for_date(parse_date(start_date))
+        week = self.settlement_cycle_service.cycle_week_for_date(parse_date(start_date))
         cycle_code = str(week.get("cycle_code", ""))
         week_index = int(week.get("week_index", 0) or 0)
 
@@ -221,7 +226,7 @@ class TargetAlertService:
         start_date: str,
         rows: list[dict[str, Any]],
     ) -> dict[str, dict[str, dict[str, Any]]]:
-        cycle_code = settlement_cycle_for_date(parse_date(start_date)).code
+        cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code
         target_cache: dict[int, dict[int, dict[str, Any]]] = {}
         result: dict[str, dict[str, dict[str, Any]]] = {}
         for row in rows:

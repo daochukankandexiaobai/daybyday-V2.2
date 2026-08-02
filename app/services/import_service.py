@@ -4,12 +4,12 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from app.services.settlement_cycle_service import SettlementCycleService
 from app.utils.date_utils import (
     day_end_iso,
     day_start_iso,
     now_iso,
     parse_date,
-    settlement_cycle_display_code,
 )
 from app.utils.json_utils import load_json_file
 from app.utils.log_utils import get_logger
@@ -29,6 +29,7 @@ class ImportService:
         team_service,
         team_repo=None,
         account_manager_repo=None,
+        settlement_cycle_service=None,
     ) -> None:
         self.logger = get_logger("import_service")
         self.record_repo = record_repo
@@ -40,6 +41,15 @@ class ImportService:
         self.team_repo = team_repo or getattr(team_service, "team_repo", None)
         self.account_manager_repo = account_manager_repo or getattr(team_service, "account_manager_repo", None)
         self.field_value_service = getattr(record_service, "field_value_service", None)
+        self.settlement_cycle_service = settlement_cycle_service or getattr(
+            record_service, "settlement_cycle_service", None
+        )
+        if self.settlement_cycle_service is None:
+            from app.db.repositories import SettlementCycleRuleRepository
+
+            self.settlement_cycle_service = SettlementCycleService(
+                SettlementCycleRuleRepository(record_repo.db)
+            )
 
     def import_files(self, file_paths: list[str], allow_template_mismatch: bool = False) -> list[dict]:
         results: list[dict] = []
@@ -275,26 +285,25 @@ class ImportService:
             return "conflict"
         return "skipped"
 
-    @staticmethod
-    def _resolve_file_cycle_code(cycle_info: dict[str, Any], export_info: dict[str, Any], records: list[dict[str, Any]]) -> str:
+    def _resolve_file_cycle_code(self, cycle_info: dict[str, Any], export_info: dict[str, Any], records: list[dict[str, Any]]) -> str:
         cycle_start = str(cycle_info.get("cycle_start", "")).strip()
         cycle_end = str(cycle_info.get("cycle_end", "")).strip()
         if cycle_end:
-            return settlement_cycle_display_code(cycle_end=cycle_end)
+            return self.settlement_cycle_service.cycle_display_code(cycle_end=cycle_end)
         if cycle_start:
-            return settlement_cycle_display_code(cycle_start=cycle_start)
+            return self.settlement_cycle_service.cycle_display_code(cycle_start=cycle_start)
 
         start_date = str(export_info.get("start_date", "")).strip()
         if start_date:
-            return settlement_cycle_display_code(record_date=start_date)
+            return self.settlement_cycle_service.cycle_display_code(record_date=start_date)
 
         for record in records:
             record_date = str(record.get("record_date") or record.get("date") or "").strip()
             if record_date:
-                return settlement_cycle_display_code(record_date=record_date)
+                return self.settlement_cycle_service.cycle_display_code(record_date=record_date)
 
         raw_code = str(cycle_info.get("cycle_code", "")).strip()
-        return settlement_cycle_display_code(cycle_code=raw_code)
+        return self.settlement_cycle_service.cycle_display_code(cycle_code=raw_code)
 
     @staticmethod
     def _pick_single_value(values: list[Any]) -> Any:
@@ -430,7 +439,9 @@ class ImportService:
         if not incoming["record_date"]:
             return False, "缺少 record_date", incoming
 
-        incoming["settlement_cycle_code"] = settlement_cycle_display_code(record_date=incoming["record_date"])
+        incoming["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
+            record_date=incoming["record_date"]
+        )
         source_team_id = int(incoming.get("team_id", 0) or 0)
         source_manager_id = int(incoming.get("account_manager_id", 0) or 0)
         incoming["_source_team_id"] = source_team_id
@@ -577,21 +588,22 @@ class ImportService:
                 )
                 return "failed", "record.team_name_snapshot 与 export_info/team_info.team_name 不一致", 0
 
-        existing_by_id = self.record_repo.get_by_record_id(incoming["record_id"])
-        if existing_by_id:
-            return self._resolve_existing(existing_by_id, incoming, "record_id")
-
-        existing_by_unique = self.record_repo.get_by_unique(
-            incoming["record_date"],
-            int(incoming["team_id"]),
-            int(incoming["account_manager_id"]),
-        )
-        if existing_by_unique:
-            return self._resolve_existing(existing_by_unique, incoming, "unique")
-
         try:
-            new_row_id = self.record_repo.insert(incoming)
-            self._apply_dynamic_values(new_row_id, incoming)
+            existing_by_id = self.record_repo.get_by_record_id(incoming["record_id"])
+            if existing_by_id:
+                return self._resolve_existing(existing_by_id, incoming, "record_id")
+
+            existing_by_unique = self.record_repo.get_by_unique(
+                incoming["record_date"],
+                int(incoming["team_id"]),
+                int(incoming["account_manager_id"]),
+            )
+            if existing_by_unique:
+                return self._resolve_existing(existing_by_unique, incoming, "unique")
+
+            with self.record_repo.db.transaction() as conn:
+                new_row_id = self.record_repo.insert(incoming, conn=conn)
+                self._apply_dynamic_values(new_row_id, incoming, conn=conn)
             self.logger.info(
                 "导入新增成功 record_id=%s date=%s team_id=%s account_manager_id=%s",
                 incoming.get("record_id"),
@@ -619,7 +631,8 @@ class ImportService:
         incoming_hash = str(incoming.get("record_hash", ""))
         if existing_hash == incoming_hash:
             if self._dynamic_values_changed(int(existing.get("id", 0) or 0), incoming):
-                self._apply_dynamic_values(int(existing.get("id", 0) or 0), incoming)
+                with self.record_repo.db.transaction() as conn:
+                    self._apply_dynamic_values(int(existing.get("id", 0) or 0), incoming, conn=conn)
                 return "updated", "动态字段已更新", 1
             return "skipped", "同版本同内容，已跳过", 0
 
@@ -651,8 +664,9 @@ class ImportService:
             if key.endswith("_daily"):
                 updates[key] = incoming[key]
 
-        self.record_repo.update_by_id(int(existing["id"]), updates)
-        self._apply_dynamic_values(int(existing["id"]), incoming)
+        with self.record_repo.db.transaction() as conn:
+            self.record_repo.update_by_id(int(existing["id"]), updates, conn=conn)
+            self._apply_dynamic_values(int(existing["id"]), incoming, conn=conn)
         self.logger.info(
             "导入更新成功 id=%s record_id=%s version=%s",
             existing.get("id"),
@@ -685,13 +699,13 @@ class ImportService:
                 values[field_key] = raw_record.get(field_key)
         return values
 
-    def _apply_dynamic_values(self, row_id: int, incoming: dict[str, Any]) -> None:
+    def _apply_dynamic_values(self, row_id: int, incoming: dict[str, Any], conn=None) -> None:
         if self.field_value_service is None:
             return
         values = incoming.get("_dynamic_metric_values", {})
         if not values:
             return
-        self.field_value_service.set_values(int(row_id), values)
+        self.field_value_service.set_values(int(row_id), values, conn=conn)
 
     def _dynamic_values_changed(self, row_id: int, incoming: dict[str, Any]) -> bool:
         if self.field_value_service is None or int(row_id or 0) <= 0:

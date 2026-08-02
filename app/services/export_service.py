@@ -6,7 +6,8 @@ from datetime import datetime
 from app.config.field_rules import CONFIGURED_JSON_EXPORT_FIELD_KEYS
 from app.fields.display_config_service import DisplayFieldConfigService
 from app.fields.registry import PAGE_JSON_EXPORT
-from app.utils.date_utils import cycle_week_for_date, parse_date, settlement_cycle_display_code, settlement_cycle_for_date
+from app.services.settlement_cycle_service import SettlementCycleService
+from app.utils.date_utils import parse_date
 from app.utils.file_utils import ensure_dir, sanitize_component
 from app.utils.json_utils import save_json_file
 from app.utils.log_utils import get_logger
@@ -23,6 +24,7 @@ class ExportService:
         template_service,
         target_alert_service=None,
         star_customer_alert_service=None,
+        settlement_cycle_service=None,
     ) -> None:
         self.logger = get_logger("export_service")
         self.record_service = record_service
@@ -31,6 +33,15 @@ class ExportService:
         self.template_service = template_service
         self.target_alert_service = target_alert_service
         self.star_customer_alert_service = star_customer_alert_service
+        self.settlement_cycle_service = settlement_cycle_service or getattr(
+            record_service, "settlement_cycle_service", None
+        )
+        if self.settlement_cycle_service is None:
+            from app.db.repositories import SettlementCycleRuleRepository
+
+            self.settlement_cycle_service = SettlementCycleService(
+                SettlementCycleRuleRepository(record_service.record_repo.db)
+            )
         self.field_value_service = getattr(record_service, "field_value_service", None)
         self.display_config_service = DisplayFieldConfigService(record_service.record_repo.db)
 
@@ -64,8 +75,8 @@ class ExportService:
 
         start_date = dataset["start_date"]
         end_date = dataset["end_date"]
-        cycle = settlement_cycle_for_date(parse_date(base_date))
-        cycle_code = settlement_cycle_display_code(record_date=base_date)
+        cycle = self.settlement_cycle_service.cycle_for_date(parse_date(base_date))
+        cycle_code = self.settlement_cycle_service.cycle_display_code(record_date=base_date)
         cycle_tag = self._build_filename_cycle_tag(dataset.get("cycle_codes", []), cycle_code)
         alert_payload = self._build_alert_payload(
             mode=mode,
@@ -169,7 +180,7 @@ class ExportService:
         is_day = normalized_mode in {"某日", "某天", "日报", "day", "daily"}
 
         if is_week:
-            week_info = cycle_week_for_date(parse_date(base_date))
+            week_info = self.settlement_cycle_service.cycle_week_for_date(parse_date(base_date))
             week_name = sanitize_component(f"第{week_info['week_index']}周")
             return f"周报_{region}_{team_name}_{manager}_{cycle_part}_{week_name}_{start_date}_{end_date}.json"
         if is_month:
@@ -240,8 +251,7 @@ class ExportService:
             item["repayment_amount"] += float(row.get("repayment_amount_daily", 0) or 0)
         return sorted(grouped.values(), key=lambda item: (str(item.get("team_name", "")), str(item.get("account_manager_name", ""))))
 
-    @staticmethod
-    def _alert_period_type(mode: str, start_date: str, end_date: str, cross_cycle: bool) -> str:
+    def _alert_period_type(self, mode: str, start_date: str, end_date: str, cross_cycle: bool) -> str:
         if cross_cycle:
             return ""
 
@@ -256,11 +266,11 @@ class ExportService:
             return "day"
 
         start_obj = parse_date(start_date)
-        week = cycle_week_for_date(start_obj)
+        week = self.settlement_cycle_service.cycle_week_for_date(start_obj)
         if str(week.get("week_start", "")) == start_date and str(week.get("week_end", "")) == end_date:
             return "week"
 
-        cycle = settlement_cycle_for_date(start_obj)
+        cycle = self.settlement_cycle_service.cycle_for_date(start_obj)
         if cycle.start.isoformat() == start_date and cycle.end_inclusive.isoformat() == end_date:
             return "cycle"
         return ""
@@ -329,9 +339,9 @@ class ExportService:
 
         record_date = str(payload.get("record_date", "") or "").strip()
         if record_date:
-            payload["settlement_cycle_code"] = settlement_cycle_display_code(record_date=record_date)
+            payload["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(record_date=record_date)
         else:
-            payload["settlement_cycle_code"] = settlement_cycle_display_code(
+            payload["settlement_cycle_code"] = self.settlement_cycle_service.cycle_display_code(
                 cycle_code=str(payload.get("settlement_cycle_code", "")),
             )
         return payload

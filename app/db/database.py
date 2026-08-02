@@ -1,6 +1,7 @@
 ﻿import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Iterator, Optional
 
 
 class DatabaseManager:
@@ -16,6 +17,21 @@ class DatabaseManager:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Provide an explicit atomic write boundary for coordinated services."""
+        conn = self.get_connection()
+        try:
+            conn.execute("BEGIN")
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
+        else:
+            conn.commit()
+        finally:
+            conn.close()
 
     def initialize(self) -> None:
         from app.db.migrations import run_migrations

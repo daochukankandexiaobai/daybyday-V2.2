@@ -20,7 +20,6 @@ def _assert(condition, message):
 def main():
     from app.db.database import DatabaseManager
     from app.db.repositories import AdminActionLogRepository
-    from app.fields.registry import PAGE_PNG_TODAY
     from app.services.admin_action_log_service import AdminActionLogService
     from app.services.field_admin_config_service import FieldAdminConfigService
 

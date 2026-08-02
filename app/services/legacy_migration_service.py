@@ -4,7 +4,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from app.utils.date_utils import now_iso, parse_date, settlement_cycle_display_code
+from app.utils.date_utils import now_iso, parse_date
 from app.utils.json_utils import load_json_file
 from app.utils.log_utils import get_logger
 from app.utils.validators import (
@@ -45,10 +45,13 @@ class LegacyMigrationService:
         "large_order_repayment_amount_daily": ("large_order_repayment_amount_daily",),
     }
 
-    def __init__(self, db_manager, template_service, record_service) -> None:
+    def __init__(self, db_manager, template_service, record_service, settlement_cycle_service=None) -> None:
         self.db_manager = db_manager
         self.template_service = template_service
         self.record_service = record_service
+        self.settlement_cycle_service = settlement_cycle_service or getattr(
+            record_service, "settlement_cycle_service", None
+        )
         self.logger = get_logger("legacy_migration_service")
 
     @staticmethod
@@ -110,14 +113,13 @@ class LegacyMigrationService:
 
         return bool(markers), markers
 
-    @staticmethod
-    def _normalize_cycle_code(value: Any, fallback_record_date: str = "") -> str:
+    def _normalize_cycle_code(self, value: Any, fallback_record_date: str = "") -> str:
         text = str(value or "").strip()
         if text:
-            return settlement_cycle_display_code(cycle_code=text)
+            return self.settlement_cycle_service.cycle_display_code(cycle_code=text)
         if fallback_record_date:
             try:
-                return settlement_cycle_display_code(record_date=fallback_record_date)
+                return self.settlement_cycle_service.cycle_display_code(record_date=fallback_record_date)
             except Exception:  # noqa: BLE001
                 return ""
         return ""

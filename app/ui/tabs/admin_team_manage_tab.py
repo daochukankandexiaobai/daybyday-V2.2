@@ -28,11 +28,19 @@ class AdminTeamManageTab(QWidget):
     STATUS_ACTIVE = "启用中"
     STATUS_INACTIVE = "已归档"
 
-    def __init__(self, admin_team_service, team_service, operator_getter=None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        admin_team_service,
+        team_service,
+        operator_getter=None,
+        settlement_cycle_service=None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.admin_team_service = admin_team_service
         self.team_service = team_service
         self.operator_getter = operator_getter
+        self.settlement_cycle_service = settlement_cycle_service
         self.current_team_id: int | None = None
         self.current_team_active = True
         self.teams: list[dict] = []
@@ -122,7 +130,10 @@ class AdminTeamManageTab(QWidget):
         self.base_date.dateChanged.connect(self.refresh_cycle_related)
 
     def _cycle_code(self) -> str:
-        return settlement_cycle_for_date(self.base_date.date().toPython()).code
+        base_date = self.base_date.date().toPython()
+        if self.settlement_cycle_service is not None:
+            return self.settlement_cycle_service.cycle_for_date(base_date).code
+        return settlement_cycle_for_date(base_date).code
 
     def _set_current_state(self, team: dict | None) -> None:
         if not team:

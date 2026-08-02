@@ -122,6 +122,12 @@ class FieldConfigRepository:
                 """
                 UPDATE field_definitions
                 SET system_field = CASE WHEN system_field = 1 THEN 1 ELSE ? END,
+                    formula_id = CASE
+                        WHEN system_field = 1
+                         AND (formula_id IS NULL OR formula_id = '')
+                         AND ? <> '' THEN ?
+                        ELSE formula_id
+                    END,
                     storage_type = CASE
                         WHEN storage_type IS NULL OR storage_type = '' THEN ?
                         WHEN system_field = 1 AND storage_type = 'display_only' THEN ?
@@ -136,6 +142,8 @@ class FieldConfigRepository:
                 """,
                 (
                     int(row.get("system_field", 1) or 0),
+                    row.get("formula_id", ""),
+                    row.get("formula_id", ""),
                     row.get("storage_type", "display_only"),
                     row.get("storage_type", "display_only"),
                     row.get("storage_column", ""),

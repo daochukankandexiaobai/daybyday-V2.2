@@ -407,6 +407,7 @@ class MainWindow(QMainWindow):
             weekly_target_service=self.services.get("weekly_target_service"),
             admin_team_service=self.services["admin_team_service"],
             operator_getter=self.get_admin_operator,
+            settlement_cycle_service=self.services.get("settlement_cycle_service"),
         )
         self.entry_tab = EntryTab(self.services["record_service"], self.services["team_service"])
         self.preview_tab = PreviewTab(
@@ -456,12 +457,15 @@ class MainWindow(QMainWindow):
             self.services["template_service"],
             self.services["view_scale_service"],
             db_path=self.db_path,
+            settlement_cycle_service=self.services.get("settlement_cycle_service"),
+            operator_getter=self.get_admin_operator,
         )
         self.logs_tab = LogsTab(self.services["import_service"])
         self.admin_team_manage_tab = AdminTeamManageTab(
             admin_team_service=self.services["admin_team_service"],
             team_service=self.services["team_service"],
             operator_getter=self.get_admin_operator,
+            settlement_cycle_service=self.services.get("settlement_cycle_service"),
         )
         self.local_data_manage_tab = LocalDataManageTab(
             admin_data_service=self.services["admin_data_service"],
@@ -547,6 +551,7 @@ class MainWindow(QMainWindow):
         self.field_report_config_tab.config_changed.connect(self.admin_action_logs_tab.on_query)
         self.template_tab.template_changed.connect(self.settings_tab.load_settings)
         self.settings_tab.view_scale_changed.connect(self.on_view_scale_changed_from_settings)
+        self.settings_tab.settlement_cycle_rule_changed.connect(self.on_settlement_cycle_rule_changed)
 
     def on_team_config_saved(self, team_id: int) -> None:
         self.services["team_service"].set_current_team_id(team_id)
@@ -580,6 +585,26 @@ class MainWindow(QMainWindow):
         reload_analysis = getattr(self.analysis_tab, "reload_field_config", None)
         if callable(reload_analysis):
             reload_analysis()
+
+    def on_settlement_cycle_rule_changed(self) -> None:
+        service = self.services.get("settlement_cycle_service")
+        if service is not None:
+            service.clear_cache()
+
+        refresh_cycle_related = getattr(self.team_setup_tab, "refresh_cycle_related", None)
+        if callable(refresh_cycle_related):
+            refresh_cycle_related()
+
+        for widget, method_name in [
+            (self.entry_tab, "reload_teams"),
+            (self.preview_tab, "refresh"),
+            (self.query_tab, "on_query"),
+            (self.analysis_tab, "on_query"),
+            (self.summary_tab, "on_query"),
+        ]:
+            method = getattr(widget, method_name, None)
+            if callable(method):
+                method()
 
     def on_view_import_data_requested(self, context: dict) -> None:
         tab_index = self.tabs.indexOf(self.query_tab)

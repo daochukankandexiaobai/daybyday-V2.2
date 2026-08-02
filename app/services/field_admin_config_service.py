@@ -122,6 +122,10 @@ class FieldAdminConfigService:
         )
         return result
 
+    def get_config_health(self) -> Dict[str, Any]:
+        """Return configuration health without adding an audit-log entry."""
+        return self.health_service.run_checks()
+
     def export_field_config_to_json(self, path: str, operator: str = "admin") -> Tuple[bool, str]:
         target = Path(path)
         payload = {
@@ -164,13 +168,14 @@ class FieldAdminConfigService:
         }
         now = _now_str()
         try:
-            with self.db_manager.get_connection() as conn:
+            with self.db_manager.transaction() as conn:
                 for row in field_rows:
                     if not isinstance(row, dict):
                         continue
                     normalized = self._normalize_field_payload(row, create=False)
                     ok, message = self._validate_field_payload(normalized, create=not bool(self.get_field(normalized["field_key"])))
                     if not ok:
+                        raise ValueError("field {} configuration invalid: {}".format(normalized.get("field_key", ""), message))
                         return False, "字段 {} 配置无效: {}".format(normalized.get("field_key", ""), message)
                     existing = conn.execute(
                         "SELECT system_field, storage_type, storage_column FROM field_definitions WHERE field_key = ?",
@@ -287,7 +292,6 @@ class FieldAdminConfigService:
                             now,
                         ),
                     )
-                conn.commit()
         except Exception as exc:  # noqa: BLE001
             return False, "字段配置导入失败: {}".format(exc)
 

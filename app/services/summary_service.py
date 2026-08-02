@@ -2,13 +2,12 @@
 
 from collections import defaultdict
 
+from app.db.repositories import SettlementCycleRuleRepository
+from app.services.settlement_cycle_service import SettlementCycleService
 from app.utils.date_utils import (
-    cycle_week_for_date,
     day_end_iso,
     day_start_iso,
     parse_date,
-    range_crosses_cycles,
-    settlement_cycle_for_date,
 )
 from app.utils.metrics_utils import aggregate_daily_rows
 
@@ -23,12 +22,16 @@ class SummaryService:
         cycle_target_repo,
         target_alert_service=None,
         star_customer_alert_service=None,
+        settlement_cycle_service=None,
     ) -> None:
         self.record_repo = record_repo
         self.import_log_repo = import_log_repo
         self.cycle_target_repo = cycle_target_repo
         self.target_alert_service = target_alert_service
         self.star_customer_alert_service = star_customer_alert_service
+        self.settlement_cycle_service = settlement_cycle_service or SettlementCycleService(
+            SettlementCycleRuleRepository(record_repo.db)
+        )
 
     def _aggregate_rows(self, rows: list[dict], target: float = 0.0, include_progress: bool = True) -> dict:
         return aggregate_daily_rows(rows, team_target=target, include_progress=include_progress)
@@ -38,9 +41,9 @@ class SummaryService:
         if not rows:
             return []
 
-        crosses = range_crosses_cycles(parse_date(start_date), parse_date(end_date))
+        crosses = self.settlement_cycle_service.range_crosses_cycles(parse_date(start_date), parse_date(end_date))
         include_progress = not crosses
-        cycle_code = settlement_cycle_for_date(parse_date(start_date)).code if not crosses else ""
+        cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code if not crosses else ""
 
         key_func_map = {
             "全公司": lambda x: "全公司",
@@ -76,10 +79,10 @@ class SummaryService:
         by_team = self.aggregate_records(start_date, end_date, "团队")
         total = self.aggregate_records(start_date, end_date, "全公司")
 
-        crosses = range_crosses_cycles(parse_date(start_date), parse_date(end_date))
+        crosses = self.settlement_cycle_service.range_crosses_cycles(parse_date(start_date), parse_date(end_date))
         cycle_targets: list[dict] = []
         if not crosses:
-            cycle_code = settlement_cycle_for_date(parse_date(start_date)).code
+            cycle_code = self.settlement_cycle_service.cycle_for_date(parse_date(start_date)).code
             team_ids = sorted({int(x.get("team_id", 0) or 0) for x in rows if int(x.get("team_id", 0) or 0) > 0})
             for team_id in team_ids:
                 cycle_targets.extend(self.cycle_target_repo.list_targets(team_id, cycle_code))
@@ -146,19 +149,18 @@ class SummaryService:
             item["repayment_amount"] += float(row.get("repayment_amount_daily", 0) or 0)
         return sorted(grouped.values(), key=lambda item: (str(item.get("team_name", "")), str(item.get("account_manager_name", ""))))
 
-    @staticmethod
-    def _alert_period_type(start_date: str, end_date: str, crosses: bool) -> str:
+    def _alert_period_type(self, start_date: str, end_date: str, crosses: bool) -> str:
         if crosses:
             return ""
         if start_date == end_date:
             return "day"
 
         start_obj = parse_date(start_date)
-        week = cycle_week_for_date(start_obj)
+        week = self.settlement_cycle_service.cycle_week_for_date(start_obj)
         if str(week.get("week_start", "")) == start_date and str(week.get("week_end", "")) == end_date:
             return "week"
 
-        cycle = settlement_cycle_for_date(start_obj)
+        cycle = self.settlement_cycle_service.cycle_for_date(start_obj)
         if cycle.start.isoformat() == start_date and cycle.end_inclusive.isoformat() == end_date:
             return "cycle"
         return ""

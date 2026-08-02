@@ -14,6 +14,7 @@ from app.db.repositories import (
     DailyRecordRepository,
     ImportLogRepository,
     SettingsRepository,
+    SettlementCycleRuleRepository,
     TeamRepository,
     TemplateRepository,
     WeeklyTargetRepository,
@@ -32,6 +33,7 @@ from app.services.legacy_migration_service import LegacyMigrationService
 from app.services.record_service import RecordService
 from app.services.report_image_service import ReportImageService
 from app.services.settings_service import SettingsService
+from app.services.settlement_cycle_service import SettlementCycleService
 from app.services.summary_service import SummaryService
 from app.services.team_service import TeamService
 from app.services.template_service import TemplateService
@@ -49,6 +51,7 @@ from app.utils.runtime_check import collect_runtime_report
 
 def build_services(db_manager: DatabaseManager) -> dict:
     settings_repo = SettingsRepository(db_manager)
+    settlement_cycle_rule_repo = SettlementCycleRuleRepository(db_manager)
     admin_repo = AdminUserRepository(db_manager)
     template_repo = TemplateRepository(db_manager)
     import_log_repo = ImportLogRepository(db_manager)
@@ -64,6 +67,11 @@ def build_services(db_manager: DatabaseManager) -> dict:
     settings_service = SettingsService(settings_repo)
     view_scale_service = ViewScaleService(settings_service)
     template_service = TemplateService(template_repo, settings_service)
+    admin_action_log_service = AdminActionLogService(admin_action_log_repo)
+    settlement_cycle_service = SettlementCycleService(
+        settlement_cycle_rule_repo,
+        admin_action_log_service=admin_action_log_service,
+    )
     team_service = TeamService(team_repo, account_manager_repo, cycle_target_repo, settings_service)
     record_service = RecordService(
         record_repo=record_repo,
@@ -72,6 +80,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
         cycle_target_repo=cycle_target_repo,
         template_service=template_service,
         field_value_service=field_value_service,
+        settlement_cycle_service=settlement_cycle_service,
     )
     analytics_service = AnalyticsService(record_service=record_service)
     weekly_target_service = WeeklyTargetService(
@@ -79,6 +88,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
         cycle_target_repo=cycle_target_repo,
         team_repo=team_repo,
         account_manager_repo=account_manager_repo,
+        settlement_cycle_service=settlement_cycle_service,
     )
     target_progress_service = TargetProgressService()
     star_customer_alert_service = StarCustomerAlertService(
@@ -90,8 +100,8 @@ def build_services(db_manager: DatabaseManager) -> dict:
         record_repo=record_repo,
         weekly_target_service=weekly_target_service,
         target_progress_service=target_progress_service,
+        settlement_cycle_service=settlement_cycle_service,
     )
-    admin_action_log_service = AdminActionLogService(admin_action_log_repo)
     admin_team_service = AdminTeamService(
         team_service=team_service,
         team_repo=team_repo,
@@ -112,6 +122,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
 
     services = {
         "settings_service": settings_service,
+        "settlement_cycle_service": settlement_cycle_service,
         "view_scale_service": view_scale_service,
         "template_service": template_service,
         "team_service": team_service,
@@ -130,6 +141,7 @@ def build_services(db_manager: DatabaseManager) -> dict:
             template_service,
             target_alert_service=target_alert_service,
             star_customer_alert_service=star_customer_alert_service,
+            settlement_cycle_service=settlement_cycle_service,
         ),
         "import_service": ImportService(
             record_repo=record_repo,
@@ -140,11 +152,13 @@ def build_services(db_manager: DatabaseManager) -> dict:
             team_service=team_service,
             team_repo=team_repo,
             account_manager_repo=account_manager_repo,
+            settlement_cycle_service=settlement_cycle_service,
         ),
         "legacy_migration_service": LegacyMigrationService(
             db_manager=db_manager,
             template_service=template_service,
             record_service=record_service,
+            settlement_cycle_service=settlement_cycle_service,
         ),
         "summary_service": SummaryService(
             record_repo,
@@ -152,8 +166,9 @@ def build_services(db_manager: DatabaseManager) -> dict:
             cycle_target_repo,
             target_alert_service=target_alert_service,
             star_customer_alert_service=star_customer_alert_service,
+            settlement_cycle_service=settlement_cycle_service,
         ),
-        "excel_service": ExcelService(db_manager),
+        "excel_service": ExcelService(db_manager, settlement_cycle_service=settlement_cycle_service),
         "report_image_service": ReportImageService(db_manager),
         "ui_scale_manager": UIScaleManager(view_scale_service),
         "admin_action_log_service": admin_action_log_service,
@@ -183,6 +198,14 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     services = build_services(db_manager)
+
+    config_health = services["field_admin_config_service"].get_config_health().get("summary", {})
+    if int(config_health.get("error_count", 0) or 0) > 0:
+        logger.warning("字段配置健康检查发现错误: %s", config_health)
+    elif int(config_health.get("warning_count", 0) or 0) > 0:
+        logger.warning("字段配置健康检查发现警告: %s", config_health)
+    else:
+        logger.info("字段配置健康检查通过")
 
     window = MainWindow(services=services, db_path=str(db_manager.db_path))
     window.show()

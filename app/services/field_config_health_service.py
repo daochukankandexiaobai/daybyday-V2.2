@@ -20,6 +20,13 @@ FIELD_KEY_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 NUMERIC_TYPES = {DATA_TYPE_INT, DATA_TYPE_AMOUNT, "money", "decimal", DATA_TYPE_PERCENT}
 TEXT_TYPES = {DATA_TYPE_TEXT, DATA_TYPE_TEXTAREA}
 NUMERIC_AGGREGATIONS = {"sum", "avg", "max", "min"}
+REQUIRED_DEFAULT_TEMPLATES = {
+    "entry_default": PAGE_DATA_ENTRY,
+    "today_display_default": "today_display",
+    "query_summary_default": PAGE_QUERY_SUMMARY,
+    "png_today_default": PAGE_PNG_TODAY,
+    "analysis_default": PAGE_ANALYSIS,
+}
 
 
 class FieldConfigHealthService:
@@ -52,6 +59,7 @@ class FieldConfigHealthService:
         self._check_field_basic_rules(fields, visible_pages_by_field, items)
         self._check_visibility_references(visibility, field_by_key, items)
         self._check_page_semantics(visibility, field_by_key, items)
+        self._check_default_templates(templates, items)
         self._check_png_templates(templates, field_by_key, items)
 
         if not any(item["level"] == "error" for item in items):
@@ -126,7 +134,12 @@ class FieldConfigHealthService:
                 bad_keys.append(field_key)
             if not label.strip():
                 empty_labels.append(field_key or "(空编码)")
-            if enabled and field_key and not visible_pages_by_field.get(field_key):
+            if (
+                enabled
+                and category == CATEGORY_RAW_DAILY
+                and field_key
+                and not visible_pages_by_field.get(field_key)
+            ):
                 lonely_fields.append(field_key)
             if enabled and category == CATEGORY_RAW_DAILY and data_type in NUMERIC_TYPES and aggregation in {"", "none"}:
                 numeric_without_aggregation.append(field_key)
@@ -192,7 +205,12 @@ class FieldConfigHealthService:
             data_type = str(field.get("data_type", "") or "")
             category = str(field.get("category", "") or "")
             aggregation = str(field.get("aggregation", "") or "")
-            if page_key == PAGE_QUERY_SUMMARY and data_type in TEXT_TYPES and aggregation != "latest":
+            if (
+                page_key == PAGE_QUERY_SUMMARY
+                and category == CATEGORY_RAW_DAILY
+                and data_type in TEXT_TYPES
+                and aggregation != "latest"
+            ):
                 query_non_aggregatable.append(field_key)
             if page_key == PAGE_ANALYSIS and data_type in TEXT_TYPES:
                 analysis_text.append(field_key)
@@ -205,6 +223,28 @@ class FieldConfigHealthService:
             self._add(items, "warning", "数据分析包含文本字段", "文本字段无法做数值分析：{}".format(", ".join(analysis_text)))
         if entry_formula:
             self._add(items, "error", "数据录入包含公式字段", "公式字段不应作为普通录入项：{}".format(", ".join(entry_formula)))
+
+    def _check_default_templates(self, templates: List[Dict[str, Any]], items: List[Dict[str, str]]) -> None:
+        templates_by_key = {
+            str(row.get("template_key", "") or ""): row
+            for row in templates
+        }
+        for template_key, expected_page_key in REQUIRED_DEFAULT_TEMPLATES.items():
+            template = templates_by_key.get(template_key)
+            if template is None:
+                self._add(items, "error", "缺少默认页面模板", template_key)
+                continue
+            if str(template.get("page_key", "") or "") != expected_page_key:
+                self._add(items, "error", "默认页面模板类型错误", template_key)
+            if int(template.get("enabled", 0) or 0) != 1:
+                self._add(items, "warning", "默认页面模板已停用", template_key)
+            try:
+                payload = json.loads(str(template.get("config_json", "{}") or "{}"))
+            except ValueError as exc:
+                self._add(items, "error", "默认页面模板 JSON 损坏", "{}: {}".format(template_key, exc))
+                continue
+            if not isinstance(payload, dict):
+                self._add(items, "error", "默认页面模板格式错误", template_key)
 
     def _check_png_templates(
         self,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import tempfile
@@ -12,6 +13,7 @@ if str(BASE_DIR) not in sys.path:
 
 
 TEST_FIELD_KEY = "regression_dynamic_count"
+_QT_APP = None
 
 
 def _assert(condition, message):
@@ -26,6 +28,16 @@ def _qt_available():
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+
+
+def _ensure_qapplication():
+    """Create the Qt application required by QFontMetrics and PNG rendering."""
+    global _QT_APP
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from app.utils.qt_compat import QApplication
+
+    _QT_APP = QApplication.instance() or QApplication([])
+    return _QT_APP
 
 
 def _build_services(db):
@@ -239,6 +251,7 @@ def _check_png_if_possible(services, team_id, tmp_dir):
         print("[full_regression] PNG/gui skipped: {}".format(reason))
         return
     try:
+        _ensure_qapplication()
         from app.services.report_image_service import ReportImageService
     except Exception as exc:  # noqa: BLE001
         print("[full_regression] PNG skipped: {}".format(exc))

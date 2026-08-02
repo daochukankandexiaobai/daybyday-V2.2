@@ -68,7 +68,7 @@ python main.py
 ## 11. Win7 打包
 推荐目录版（onedir）：
 ```powershell
-pyinstaller --noconfirm --clean --windowed --onedir --name TeamReportAppWin7 --add-data "assets;assets" main.py
+.\scripts\build_win7_dist.ps1
 ```
 
 输出：`dist\TeamReportAppWin7\`

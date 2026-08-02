@@ -15,12 +15,15 @@ class BaseRepository:
     def _row_to_dict(row) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
-    def _table_columns(self, table_name: str) -> set[str]:
+    def _table_columns(self, table_name: str, conn: sqlite3.Connection | None = None) -> set[str]:
         cached = self._columns_cache.get(table_name)
         if cached is not None:
             return cached
 
-        with self.db.get_connection() as conn:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                rows = local_conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        else:
             rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
         cols = {str(row["name"]) for row in rows}
         self._columns_cache[table_name] = cols
@@ -535,19 +538,31 @@ class CycleTargetRepository(BaseRepository):
         settlement_cycle_code: str,
         target_amount: float,
         now: str,
+        conn: sqlite3.Connection | None = None,
     ) -> None:
-        with self.db.get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO cycle_targets
-                (team_id, account_manager_id, settlement_cycle_code, target_amount, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(team_id, account_manager_id, settlement_cycle_code)
-                DO UPDATE SET target_amount = excluded.target_amount, updated_at = excluded.updated_at
-                """,
-                (team_id, account_manager_id, settlement_cycle_code, target_amount, now, now),
-            )
-            conn.commit()
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                self.upsert_target(
+                    team_id,
+                    account_manager_id,
+                    settlement_cycle_code,
+                    target_amount,
+                    now,
+                    conn=local_conn,
+                )
+                local_conn.commit()
+            return
+
+        conn.execute(
+            """
+            INSERT INTO cycle_targets
+            (team_id, account_manager_id, settlement_cycle_code, target_amount, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(team_id, account_manager_id, settlement_cycle_code)
+            DO UPDATE SET target_amount = excluded.target_amount, updated_at = excluded.updated_at
+            """,
+            (team_id, account_manager_id, settlement_cycle_code, target_amount, now, now),
+        )
 
     def list_targets(self, team_id: int, settlement_cycle_code: str) -> list[dict[str, Any]]:
         with self.db.get_connection() as conn:
@@ -666,56 +681,63 @@ class WeeklyTargetRepository(BaseRepository):
         week_index: int,
         rows: list[dict[str, Any]],
         now: str,
+        conn: sqlite3.Connection | None = None,
     ) -> int:
-        with self.db.get_connection() as conn:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                saved_count = self.replace_targets_for_team_week(
+                    team_id, settlement_cycle_code, week_index, rows, now, conn=local_conn
+                )
+                local_conn.commit()
+                return saved_count
+
+        conn.execute(
+            """
+            DELETE FROM weekly_targets
+            WHERE team_id = ?
+              AND settlement_cycle_code = ?
+              AND week_index = ?
+            """,
+            (team_id, settlement_cycle_code, week_index),
+        )
+        saved_count = 0
+        for row in rows:
             conn.execute(
                 """
-                DELETE FROM weekly_targets
-                WHERE team_id = ?
-                  AND settlement_cycle_code = ?
-                  AND week_index = ?
-                """,
-                (team_id, settlement_cycle_code, week_index),
-            )
-            saved_count = 0
-            for row in rows:
-                conn.execute(
-                    """
-                    INSERT INTO weekly_targets
-                    (
-                        settlement_cycle_code,
-                        week_index,
-                        week_start_date,
-                        week_end_date,
-                        team_id,
-                        account_manager_id,
-                        visit_target,
-                        quality_visit_target,
-                        repayment_target,
-                        version,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        settlement_cycle_code,
-                        int(row.get("week_index", 0) or 0),
-                        str(row.get("week_start_date", "")).strip(),
-                        str(row.get("week_end_date", "")).strip(),
-                        team_id,
-                        int(row.get("account_manager_id", 0) or 0),
-                        int(row.get("visit_target", 0) or 0),
-                        int(row.get("quality_visit_target", 0) or 0),
-                        float(row.get("repayment_target", 0) or 0.0),
-                        int(row.get("version", 1) or 1),
-                        now,
-                        now,
-                    ),
+                INSERT INTO weekly_targets
+                (
+                    settlement_cycle_code,
+                    week_index,
+                    week_start_date,
+                    week_end_date,
+                    team_id,
+                    account_manager_id,
+                    visit_target,
+                    quality_visit_target,
+                    repayment_target,
+                    version,
+                    created_at,
+                    updated_at
                 )
-                saved_count += 1
-            conn.commit()
-            return saved_count
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    settlement_cycle_code,
+                    int(row.get("week_index", 0) or 0),
+                    str(row.get("week_start_date", "")).strip(),
+                    str(row.get("week_end_date", "")).strip(),
+                    team_id,
+                    int(row.get("account_manager_id", 0) or 0),
+                    int(row.get("visit_target", 0) or 0),
+                    int(row.get("quality_visit_target", 0) or 0),
+                    float(row.get("repayment_target", 0) or 0.0),
+                    int(row.get("version", 1) or 1),
+                    now,
+                    now,
+                ),
+            )
+            saved_count += 1
+        return saved_count
 
     def replace_targets_for_team_cycle(
         self,
@@ -723,71 +745,85 @@ class WeeklyTargetRepository(BaseRepository):
         settlement_cycle_code: str,
         rows: list[dict[str, Any]],
         now: str,
+        conn: sqlite3.Connection | None = None,
     ) -> int:
-        with self.db.get_connection() as conn:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                saved_count = self.replace_targets_for_team_cycle(
+                    team_id, settlement_cycle_code, rows, now, conn=local_conn
+                )
+                local_conn.commit()
+                return saved_count
+
+        conn.execute(
+            """
+            DELETE FROM weekly_targets
+            WHERE team_id = ? AND settlement_cycle_code = ?
+            """,
+            (team_id, settlement_cycle_code),
+        )
+        saved_count = 0
+        for row in rows:
             conn.execute(
                 """
-                DELETE FROM weekly_targets
-                WHERE team_id = ? AND settlement_cycle_code = ?
-                """,
-                (team_id, settlement_cycle_code),
-            )
-            saved_count = 0
-            for row in rows:
-                conn.execute(
-                    """
-                    INSERT INTO weekly_targets
-                    (
-                        settlement_cycle_code,
-                        week_index,
-                        week_start_date,
-                        week_end_date,
-                        team_id,
-                        account_manager_id,
-                        visit_target,
-                        quality_visit_target,
-                        repayment_target,
-                        version,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        settlement_cycle_code,
-                        int(row.get("week_index", 0) or 0),
-                        str(row.get("week_start_date", "")).strip(),
-                        str(row.get("week_end_date", "")).strip(),
-                        team_id,
-                        int(row.get("account_manager_id", 0) or 0),
-                        int(row.get("visit_target", 0) or 0),
-                        int(row.get("quality_visit_target", 0) or 0),
-                        float(row.get("repayment_target", 0) or 0.0),
-                        int(row.get("version", 1) or 1),
-                        now,
-                        now,
-                    ),
-                )
-                saved_count += 1
-            conn.commit()
-            return saved_count
-
-    def sum_targets_by_manager(self, team_id: int, settlement_cycle_code: str) -> dict[int, dict[str, Any]]:
-        with self.db.get_connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT
+                INSERT INTO weekly_targets
+                (
+                    settlement_cycle_code,
+                    week_index,
+                    week_start_date,
+                    week_end_date,
+                    team_id,
                     account_manager_id,
-                    COALESCE(SUM(visit_target), 0) AS visit_target,
-                    COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
-                    COALESCE(SUM(repayment_target), 0) AS repayment_target
-                FROM weekly_targets
-                WHERE team_id = ? AND settlement_cycle_code = ?
-                GROUP BY account_manager_id
+                    visit_target,
+                    quality_visit_target,
+                    repayment_target,
+                    version,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (team_id, settlement_cycle_code),
-            ).fetchall()
-            return {int(row["account_manager_id"]): dict(row) for row in rows}
+                (
+                    settlement_cycle_code,
+                    int(row.get("week_index", 0) or 0),
+                    str(row.get("week_start_date", "")).strip(),
+                    str(row.get("week_end_date", "")).strip(),
+                    team_id,
+                    int(row.get("account_manager_id", 0) or 0),
+                    int(row.get("visit_target", 0) or 0),
+                    int(row.get("quality_visit_target", 0) or 0),
+                    float(row.get("repayment_target", 0) or 0.0),
+                    int(row.get("version", 1) or 1),
+                    now,
+                    now,
+                ),
+            )
+            saved_count += 1
+        return saved_count
+
+    def sum_targets_by_manager(
+        self,
+        team_id: int,
+        settlement_cycle_code: str,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                return self.sum_targets_by_manager(team_id, settlement_cycle_code, conn=local_conn)
+        rows = conn.execute(
+            """
+            SELECT
+                account_manager_id,
+                COALESCE(SUM(visit_target), 0) AS visit_target,
+                COALESCE(SUM(quality_visit_target), 0) AS quality_visit_target,
+                COALESCE(SUM(repayment_target), 0) AS repayment_target
+            FROM weekly_targets
+            WHERE team_id = ? AND settlement_cycle_code = ?
+            GROUP BY account_manager_id
+            """,
+            (team_id, settlement_cycle_code),
+        ).fetchall()
+        return {int(row["account_manager_id"]): dict(row) for row in rows}
 
     def sum_targets_for_team(self, team_id: int, settlement_cycle_code: str) -> dict[str, Any]:
         with self.db.get_connection() as conn:
@@ -851,21 +887,29 @@ class DailyRecordRepository(BaseRepository):
             row = conn.execute("SELECT * FROM daily_records WHERE id = ?", (row_id,)).fetchone()
             return self._row_to_dict(row)
 
-    def get_by_unique(self, record_date: str, team_id: int, account_manager_id: int) -> dict[str, Any] | None:
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT *
-                FROM daily_records
-                WHERE record_date = ? AND team_id = ? AND account_manager_id = ?
-                LIMIT 1
-                """,
-                (record_date, team_id, account_manager_id),
-            ).fetchone()
-            return self._row_to_dict(row)
+    def get_by_unique(
+        self,
+        record_date: str,
+        team_id: int,
+        account_manager_id: int,
+        conn: sqlite3.Connection | None = None,
+    ) -> dict[str, Any] | None:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                return self.get_by_unique(record_date, team_id, account_manager_id, conn=local_conn)
+        row = conn.execute(
+            """
+            SELECT *
+            FROM daily_records
+            WHERE record_date = ? AND team_id = ? AND account_manager_id = ?
+            LIMIT 1
+            """,
+            (record_date, team_id, account_manager_id),
+        ).fetchone()
+        return self._row_to_dict(row)
 
-    def insert(self, record: dict[str, Any]) -> int:
-        columns = self._table_columns("daily_records")
+    def insert(self, record: dict[str, Any], conn: sqlite3.Connection | None = None) -> int:
+        columns = self._table_columns("daily_records", conn=conn)
         filtered = {k: v for k, v in record.items() if k in columns}
         self._apply_legacy_aliases(filtered, columns)
         if "business_key" in columns and not str(filtered.get("business_key", "")).strip():
@@ -875,13 +919,21 @@ class DailyRecordRepository(BaseRepository):
         values = [filtered[key] for key in fields]
         placeholders = ", ".join(["?" for _ in fields])
         sql = f"INSERT INTO daily_records ({', '.join(fields)}) VALUES ({placeholders})"
-        with self.db.get_connection() as conn:
+        if conn is not None:
             cursor = conn.execute(sql, values)
-            conn.commit()
+            return int(cursor.lastrowid)
+        with self.db.get_connection() as local_conn:
+            cursor = local_conn.execute(sql, values)
+            local_conn.commit()
             return int(cursor.lastrowid)
 
-    def update_by_id(self, row_id: int, updates: dict[str, Any]) -> None:
-        columns = self._table_columns("daily_records")
+    def update_by_id(
+        self,
+        row_id: int,
+        updates: dict[str, Any],
+        conn: sqlite3.Connection | None = None,
+    ) -> None:
+        columns = self._table_columns("daily_records", conn=conn)
         filtered = {k: v for k, v in updates.items() if k in columns}
         if not filtered:
             return
@@ -890,9 +942,12 @@ class DailyRecordRepository(BaseRepository):
         keys = list(filtered.keys())
         set_sql = ", ".join([f"{k} = ?" for k in keys])
         values = [filtered[k] for k in keys] + [row_id]
-        with self.db.get_connection() as conn:
+        if conn is not None:
             conn.execute(f"UPDATE daily_records SET {set_sql} WHERE id = ?", values)
-            conn.commit()
+            return
+        with self.db.get_connection() as local_conn:
+            local_conn.execute(f"UPDATE daily_records SET {set_sql} WHERE id = ?", values)
+            local_conn.commit()
 
     def delete_by_id(self, row_id: int) -> bool:
         with self.db.get_connection() as conn:
@@ -1142,6 +1197,92 @@ class SettingsRepository(BaseRepository):
         with self.db.get_connection() as conn:
             rows = conn.execute("SELECT key, value FROM app_settings").fetchall()
             return {row["key"]: row["value"] for row in rows}
+
+
+class SettlementCycleRuleRepository(BaseRepository):
+    """Persist the single organization-wide settlement cycle rule."""
+
+    def get_active_rule(self) -> dict[str, Any] | None:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM settlement_cycle_rules
+                WHERE is_active = 1
+                ORDER BY effective_from DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return self._row_to_dict(row)
+
+    def has_business_data(self) -> bool:
+        with self.db.get_connection() as conn:
+            for table_name in ("daily_records", "weekly_targets", "cycle_targets"):
+                row = conn.execute(
+                    "SELECT 1 FROM {} LIMIT 1".format(table_name)
+                ).fetchone()
+                if row is not None:
+                    return True
+        return False
+
+    def update_active_initial_rule(
+        self,
+        rule_mode: str,
+        start_day: int,
+        operator: str,
+        now: str,
+    ) -> bool:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, is_locked
+                FROM settlement_cycle_rules
+                WHERE is_active = 1
+                ORDER BY effective_from DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None or int(row["is_locked"] or 0) == 1:
+                return False
+            for table_name in ("daily_records", "weekly_targets", "cycle_targets"):
+                if conn.execute("SELECT 1 FROM {} LIMIT 1".format(table_name)).fetchone() is not None:
+                    return False
+            conn.execute(
+                """
+                UPDATE settlement_cycle_rules
+                SET rule_mode = ?, start_day = ?, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (rule_mode, int(start_day), now, operator, int(row["id"])),
+            )
+            conn.commit()
+            return True
+
+    def lock_active_rule(self, operator: str, now: str) -> bool:
+        with self.db.get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id, is_locked
+                FROM settlement_cycle_rules
+                WHERE is_active = 1
+                ORDER BY effective_from DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            if row is None:
+                return False
+            if int(row["is_locked"] or 0) == 1:
+                return True
+            conn.execute(
+                """
+                UPDATE settlement_cycle_rules
+                SET is_locked = 1, updated_at = ?, updated_by = ?
+                WHERE id = ?
+                """,
+                (now, operator, int(row["id"])),
+            )
+            conn.commit()
+            return True
 
 
 class AdminUserRepository(BaseRepository):

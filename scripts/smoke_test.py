@@ -22,6 +22,7 @@ def main() -> int:
         AccountManagerRepository,
         CycleTargetRepository,
         DailyRecordRepository,
+        SettlementCycleRuleRepository,
         TeamRepository,
     )
     from app.config.field_profiles import PROFILE_PREVIEW_TABLE, PROFILE_QUERY_SUMMARY_TABLE, get_profile_field_keys
@@ -43,6 +44,7 @@ def main() -> int:
     from app.config.field_rules import get_aggregation_strategy, get_default_value, get_format_type
     from app.services.field_admin_config_service import FieldAdminConfigService
     from app.services.record_service import RecordService
+    from app.services.settlement_cycle_service import SettlementCycleService
 
     fields = get_all_fields()
     _assert(len(fields) >= 40, "字段注册中心字段数量异常")
@@ -132,6 +134,11 @@ def main() -> int:
             _assert("field_page_visibility" in table_names, "缺少 field_page_visibility 表")
             _assert("view_templates" in table_names, "缺少 view_templates 表")
             _assert("daily_metric_values" in table_names, "缺少 daily_metric_values 表")
+            _assert("settlement_cycle_rules" in table_names, "缺少 settlement_cycle_rules 表")
+
+            cycle_service = SettlementCycleService(SettlementCycleRuleRepository(db))
+            cycle_status = cycle_service.get_rule_status()
+            _assert(cycle_status["rule_mode"] == "calendar_month", "新库结算周期默认值异常")
 
             field_count = int(conn.execute("SELECT COUNT(1) AS c FROM field_definitions").fetchone()["c"])
             visibility_count = int(conn.execute("SELECT COUNT(1) AS c FROM field_page_visibility").fetchone()["c"])
@@ -165,6 +172,7 @@ def main() -> int:
             overview = field_admin_service.get_config_overview()
             _assert(overview["enabled_field_count"] > 0, "配置总览字段统计异常")
             health = field_admin_service.run_config_health_check(operator="smoke")
+            _assert(int(health["summary"].get("error_count", 0) or 0) == 0, "default field configuration has errors")
             _assert("summary" in health and "items" in health, "配置健康检查结果异常")
             class _TemplateService:
                 @staticmethod

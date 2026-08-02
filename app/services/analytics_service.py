@@ -14,7 +14,6 @@ from app.fields.aggregation_service import (
     normalize_aggregation,
 )
 from app.fields.analysis_config_service import (
-    ANALYSIS_TYPE_RANKING,
     ANALYSIS_TYPE_TREND,
     AnalysisConfigService,
 )

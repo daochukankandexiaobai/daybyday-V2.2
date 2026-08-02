@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from app.config.field_profiles import get_profile_field_keys
 from app.config.field_registry import get_field_spec

@@ -9,8 +9,13 @@ from app.utils.log_utils import get_logger
 
 DEFAULT_TEMPLATE_NAME = "V1.0日报模板"
 DEFAULT_TEMPLATE_VERSION = "2026.04.01"
-SCHEMA_VERSION = "1.5"
-BUSINESS_RULES_VERSION = "1.1"
+SCHEMA_VERSION = "1.6"
+BUSINESS_RULES_VERSION = "1.2"
+DAILY_RECORD_MAINTENANCE_VERSION = "1"
+FIELD_CONFIG_DEFAULTS_VERSION = "1"
+
+DAILY_RECORD_MAINTENANCE_KEY = "daily_record_maintenance_version"
+FIELD_CONFIG_DEFAULTS_KEY = "field_config_defaults_version"
 
 LOGGER = get_logger("migrations")
 
@@ -44,6 +49,79 @@ def _ensure_column(conn, table_name: str, column_name: str, ddl: str) -> None:
 
 def _has_column(conn, table_name: str, column_name: str) -> bool:
     return column_name in _table_columns(conn, table_name)
+
+
+def _ensure_app_settings_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """
+    )
+
+
+def _get_app_setting(conn, key: str) -> str:
+    row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+    return str(row["value"] or "") if row is not None else ""
+
+
+def _set_app_setting(conn, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO app_settings (key, value) VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+
+
+def _index_exists(conn, index_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ? LIMIT 1",
+        (index_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _ensure_settlement_cycle_rule_table(conn) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settlement_cycle_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            rule_key TEXT UNIQUE NOT NULL,
+            rule_mode TEXT NOT NULL,
+            start_day INTEGER NOT NULL DEFAULT 1,
+            effective_from TEXT NOT NULL,
+            is_active INTEGER DEFAULT 1,
+            is_locked INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            created_by TEXT DEFAULT '',
+            updated_by TEXT DEFAULT ''
+        );
+        """
+    )
+    for column_name, ddl in [
+        ("rule_key", "TEXT NOT NULL DEFAULT ''"),
+        ("rule_mode", "TEXT NOT NULL DEFAULT 'calendar_month'"),
+        ("start_day", "INTEGER NOT NULL DEFAULT 1"),
+        ("effective_from", "TEXT NOT NULL DEFAULT '1900-01-01'"),
+        ("is_active", "INTEGER DEFAULT 1"),
+        ("is_locked", "INTEGER DEFAULT 0"),
+        ("created_at", "TEXT NOT NULL DEFAULT ''"),
+        ("updated_at", "TEXT NOT NULL DEFAULT ''"),
+        ("created_by", "TEXT DEFAULT ''"),
+        ("updated_by", "TEXT DEFAULT ''"),
+    ]:
+        _ensure_column(conn, "settlement_cycle_rules", column_name, ddl)
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_settlement_cycle_rules_active
+        ON settlement_cycle_rules(is_active, effective_from DESC, id DESC)
+        """
+    )
 
 
 def _ensure_field_config_tables(conn) -> None:
@@ -307,10 +385,11 @@ def _migrate_legacy_daily_records(conn) -> None:
 
 
 def _normalize_daily_record_cycle_codes(conn) -> None:
-    """按 record_date 统一结算周期编码为“结束月命名”。
+    """仅为缺失周期编码的历史日报补齐旧版周期编码。
 
-    例如：
-    - 2026-03-29 ~ 2026-04-28 => 2026-04期
+    已有编码属于历史快照，绝不在迁移时按当前结算规则重算。
+    对旧库中缺失编码的数据，继续按旧版 29 日至次月 28 日规则补齐，
+    以便与自动锁定的 legacy_29 配置保持一致。
     """
     if not _has_column(conn, "daily_records", "settlement_cycle_code"):
         return
@@ -320,21 +399,31 @@ def _normalize_daily_record_cycle_codes(conn) -> None:
     conn.execute(
         """
         UPDATE daily_records
-        SET settlement_cycle_code = COALESCE(
-            CASE
+        SET settlement_cycle_code = CASE
                 WHEN record_date IS NULL OR record_date = '' THEN settlement_cycle_code
                 WHEN CAST(strftime('%d', record_date) AS INTEGER) >= 29
                     THEN strftime('%Y-%m', date(record_date, 'start of month', '+1 month')) || '期'
                 ELSE strftime('%Y-%m', date(record_date)) || '期'
-            END,
-            settlement_cycle_code
-        )
+            END
+        WHERE settlement_cycle_code IS NULL OR settlement_cycle_code = ''
         """
     )
 
 
 def _deduplicate_for_unique_daily_key(conn) -> None:
     """按 V1 唯一键去重，保留同键的最新一条（id 最大）。"""
+
+    duplicate = conn.execute(
+        """
+        SELECT 1
+        FROM daily_records
+        GROUP BY record_date, team_id, account_manager_id
+        HAVING COUNT(1) > 1
+        LIMIT 1
+        """
+    ).fetchone()
+    if duplicate is None:
+        return
 
     source_columns = _table_column_info(conn, "daily_records")
     conn.execute(
@@ -403,6 +492,7 @@ def run_migrations(db_manager) -> None:
     LOGGER.info("开始执行数据库迁移")
     with db_manager.get_connection() as conn:
         cursor = conn.cursor()
+        _ensure_app_settings_table(conn)
 
         cursor.execute(
             """
@@ -563,10 +653,18 @@ def run_migrations(db_manager) -> None:
         ]:
             _ensure_column(conn, "daily_records", column_name, ddl)
 
-        cursor.execute("DROP INDEX IF EXISTS idx_daily_records_unique_v1")
-        _migrate_legacy_daily_records(conn)
-        _normalize_daily_record_cycle_codes(conn)
-        _deduplicate_for_unique_daily_key(conn)
+        daily_maintenance_required = (
+            _get_app_setting(conn, DAILY_RECORD_MAINTENANCE_KEY) != DAILY_RECORD_MAINTENANCE_VERSION
+            or not _index_exists(conn, "idx_daily_records_unique_v1")
+        )
+        if daily_maintenance_required:
+            cursor.execute("DROP INDEX IF EXISTS idx_daily_records_unique_v1")
+            _migrate_legacy_daily_records(conn)
+            _normalize_daily_record_cycle_codes(conn)
+            _deduplicate_for_unique_daily_key(conn)
+            _set_app_setting(conn, DAILY_RECORD_MAINTENANCE_KEY, DAILY_RECORD_MAINTENANCE_VERSION)
+        else:
+            LOGGER.debug("日报历史维护已完成，跳过重复规范化与去重")
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_daily_records_unique_v1 "
             "ON daily_records(team_id, account_manager_id, record_date);"
@@ -611,15 +709,6 @@ def run_migrations(db_manager) -> None:
                 salt TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
-            );
-            """
-        )
-
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS app_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
             );
             """
         )
@@ -715,9 +804,59 @@ def run_migrations(db_manager) -> None:
 
         _ensure_field_config_tables(conn)
         _ensure_dynamic_metric_value_table(conn)
+        _ensure_settlement_cycle_rule_table(conn)
         _bootstrap_defaults(conn)
         conn.commit()
     LOGGER.info("数据库迁移完成，schema_version=%s business_rules_version=%s", SCHEMA_VERSION, BUSINESS_RULES_VERSION)
+
+
+def _bootstrap_settlement_cycle_rule(conn, now: str) -> None:
+    existing = conn.execute(
+        "SELECT id FROM settlement_cycle_rules WHERE is_active = 1 LIMIT 1"
+    ).fetchone()
+    if existing is not None:
+        return
+
+    has_existing_data = False
+    for table_name in ("daily_records", "weekly_targets", "cycle_targets"):
+        row = conn.execute("SELECT 1 FROM {} LIMIT 1".format(table_name)).fetchone()
+        if row is not None:
+            has_existing_data = True
+            break
+
+    if has_existing_data:
+        rule_key = "legacy_29"
+        rule_mode = "legacy_29"
+        start_day = 29
+        is_locked = 1
+        created_by = "migration"
+    else:
+        rule_key = "initial_calendar_month"
+        rule_mode = "calendar_month"
+        start_day = 1
+        is_locked = 0
+        created_by = "system"
+
+    conn.execute(
+        """
+        INSERT INTO settlement_cycle_rules
+        (rule_key, rule_mode, start_day, effective_from, is_active, is_locked,
+         created_at, updated_at, created_by, updated_by)
+        VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+        """,
+        (
+            rule_key,
+            rule_mode,
+            start_day,
+            "1900-01-01",
+            is_locked,
+            now,
+            now,
+            created_by,
+            created_by,
+        ),
+    )
+    LOGGER.info("初始化结算周期规则 mode=%s start_day=%s locked=%s", rule_mode, start_day, is_locked)
 
 
 def _bootstrap_defaults(conn) -> None:
@@ -830,15 +969,26 @@ def _bootstrap_defaults(conn) -> None:
         (str(team_id),),
     )
 
-    from app.fields.field_config_service import bootstrap_default_field_config
+    _bootstrap_settlement_cycle_rule(conn, now)
 
-    field_config_result = bootstrap_default_field_config(conn)
-    LOGGER.info(
-        "字段配置默认值同步完成 fields=%s visibility=%s templates=%s inserted_fields=%s inserted_visibility=%s inserted_templates=%s",
-        field_config_result.get("field_count"),
-        field_config_result.get("visibility_count"),
-        field_config_result.get("template_count"),
-        field_config_result.get("inserted_fields"),
-        field_config_result.get("inserted_visibility"),
-        field_config_result.get("inserted_templates"),
-    )
+    if _get_app_setting(conn, FIELD_CONFIG_DEFAULTS_KEY) != FIELD_CONFIG_DEFAULTS_VERSION:
+        from app.fields.field_config_service import bootstrap_default_field_config
+
+        field_config_result = bootstrap_default_field_config(conn)
+        _set_app_setting(conn, FIELD_CONFIG_DEFAULTS_KEY, FIELD_CONFIG_DEFAULTS_VERSION)
+        LOGGER.info(
+            "字段配置默认值同步完成 fields=%s visibility=%s templates=%s inserted_fields=%s inserted_visibility=%s inserted_templates=%s",
+            field_config_result.get("field_count"),
+            field_config_result.get("visibility_count"),
+            field_config_result.get("template_count"),
+            field_config_result.get("inserted_fields"),
+            field_config_result.get("inserted_visibility"),
+            field_config_result.get("inserted_templates"),
+        )
+    else:
+        from app.fields.field_config_service import repair_missing_system_formula_ids
+
+        repaired_formula_ids = repair_missing_system_formula_ids(conn)
+        if repaired_formula_ids:
+            LOGGER.info("Repaired missing system formula ids count=%s", repaired_formula_ids)
+        LOGGER.debug("字段配置默认值已同步，跳过重复写入")

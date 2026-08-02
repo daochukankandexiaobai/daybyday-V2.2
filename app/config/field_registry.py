@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 CATEGORY_RAW_DAILY = "raw_daily"
@@ -76,6 +76,20 @@ _FORMULA_FIELD_KEYS = {
     "repayment_conversion_rate",
     "sales_conversion_rate",
     "warrant_conversion_rate",
+}
+
+_DEFAULT_FORMULA_ID_BY_FIELD_KEY = {
+    "target_progress": "target_completion_rate",
+    "daily_signing_rate": "daily_sign_rate",
+    "daily_quality_visit_rate": "quality_visit_rate",
+    "daily_approval_rate": "approval_rate",
+    "daily_sales_conversion_rate": "sales_conversion_rate",
+    "signing_rate": "sign_rate",
+    "quality_visit_rate": "quality_visit_rate",
+    "approval_rate": "approval_rate",
+    "repayment_conversion_rate": "repayment_conversion_rate",
+    "sales_conversion_rate": "sales_conversion_rate",
+    "warrant_conversion_rate": "warrant_conversion_rate",
 }
 
 _FIXED_DAILY_RECORD_FIELD_KEYS = {
@@ -296,6 +310,8 @@ def _field(
         storage_type = _infer_storage_type(key, category, aggregation, db_ddl)
     if not storage_column and storage_type == STORAGE_FIXED_COLUMN:
         storage_column = key
+    if not formula_id:
+        formula_id = _DEFAULT_FORMULA_ID_BY_FIELD_KEY.get(key, "")
 
     return FieldSpec(
         key=key,

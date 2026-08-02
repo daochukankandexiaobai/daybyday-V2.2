@@ -12,7 +12,7 @@ from app.db.database import DatabaseManager
 from app.fields.display_config_service import DisplayFieldConfigService
 from app.fields.field_value_service import FieldValueService
 from app.fields.registry import PAGE_EXCEL_EXPORT
-from app.utils.date_utils import settlement_cycle_display_code
+from app.services.settlement_cycle_service import SettlementCycleService
 
 
 class ExcelService:
@@ -24,10 +24,15 @@ class ExcelService:
         "source_type": "来源",
     }
 
-    def __init__(self, db_manager=None) -> None:
+    def __init__(self, db_manager=None, settlement_cycle_service=None) -> None:
         self.db_manager = db_manager or DatabaseManager()
         self.display_config_service = DisplayFieldConfigService(self.db_manager)
         self.field_value_service = FieldValueService(self.db_manager)
+        if settlement_cycle_service is None:
+            from app.db.repositories import SettlementCycleRuleRepository
+
+            settlement_cycle_service = SettlementCycleService(SettlementCycleRuleRepository(self.db_manager))
+        self.settlement_cycle_service = settlement_cycle_service
 
     def export_company_report(
         self,
@@ -75,7 +80,6 @@ class ExcelService:
 
     def _write_raw_sheet(self, wb: Workbook, company_name: str, start_date: str, end_date: str, rows: list[dict]) -> None:
         field_defs = self._raw_field_definitions()
-        field_keys = [str(row.get("field_key", "")) for row in field_defs]
         headers = [self._raw_header_for_def(row) for row in field_defs]
 
         data = []
@@ -137,8 +141,8 @@ class ExcelService:
         if field_key == "settlement_cycle_code":
             record_date = str(row.get("record_date", ""))
             if record_date.strip():
-                return settlement_cycle_display_code(record_date=record_date)
-            return settlement_cycle_display_code(cycle_code=str(row.get("settlement_cycle_code", "")))
+                return self.settlement_cycle_service.cycle_display_code(record_date=record_date)
+            return self.settlement_cycle_service.cycle_display_code(cycle_code=str(row.get("settlement_cycle_code", "")))
 
         if str(field_def.get("storage_type") or "") == "dynamic_metric":
             try:
@@ -233,7 +237,7 @@ class ExcelService:
                 int(r.get("team_id", 0) or 0),
                 int(r.get("account_manager_id", 0) or 0),
                 r.get("account_manager_name", ""),
-                settlement_cycle_display_code(cycle_code=str(r.get("settlement_cycle_code", ""))),
+                self.settlement_cycle_service.cycle_display_code(cycle_code=str(r.get("settlement_cycle_code", ""))),
                 float(r.get("target_amount", 0) or 0),
                 r.get("updated_at", ""),
             ]
@@ -334,7 +338,7 @@ class ExcelService:
                 r.get("import_time", ""),
                 r.get("file_name", ""),
                 r.get("team_name", ""),
-                settlement_cycle_display_code(cycle_code=str(r.get("settlement_cycle_code", ""))),
+                self.settlement_cycle_service.cycle_display_code(cycle_code=str(r.get("settlement_cycle_code", ""))),
                 r.get("file_path", ""),
                 r.get("export_id", ""),
                 r.get("template_version", ""),

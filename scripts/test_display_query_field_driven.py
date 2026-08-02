@@ -185,6 +185,18 @@ def main():
                 four_star_customer_count_daily=1,
                 five_star_customer_count_daily=1,
             )
+            _insert_record(
+                conn,
+                1,
+                101,
+                "张三",
+                "2026-07-01",
+                repayment_amount_daily=50,
+                visit_count_daily=1,
+                signing_count_daily=1,
+                four_star_customer_count_daily=1,
+                five_star_customer_count_daily=1,
+            )
             conn.commit()
 
         service = RecordService(
@@ -222,11 +234,11 @@ def main():
 
         cross = service.get_query_summary_grouped_by_account_manager(
             mode="自定义",
-            base_date="2026-06-28",
+            base_date="2026-06-30",
             team_id=None,
             team_ids=[1],
-            custom_start="2026-06-28",
-            custom_end="2026-06-29",
+            custom_start="2026-06-29",
+            custom_end="2026-07-01",
         )
         _assert(cross["cross_cycle"], "range should cross settlement cycles")
         _assert(cross["rows"][0]["target_progress"] is None, "cross-cycle target progress should be empty")

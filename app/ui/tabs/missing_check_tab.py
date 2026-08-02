@@ -16,14 +16,12 @@ from app.utils.qt_compat import (
     QWidget,
 )
 
-from app.utils.date_utils import resolve_report_range
-
-
 class MissingCheckTab(QWidget):
     def __init__(self, import_service, settings_service, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.import_service = import_service
         self.settings_service = settings_service
+        self.settlement_cycle_service = import_service.settlement_cycle_service
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -100,14 +98,16 @@ class MissingCheckTab(QWidget):
         mode = self.mode_combo.currentText()
         try:
             if mode == "自定义":
-                start, end = resolve_report_range(
+                start, end = self.settlement_cycle_service.resolve_report_range(
                     mode,
                     self.base_date.date().toPython(),
                     self.custom_start.date().toPython(),
                     self.custom_end.date().toPython(),
                 )
             else:
-                start, end = resolve_report_range(mode, self.base_date.date().toPython())
+                start, end = self.settlement_cycle_service.resolve_report_range(
+                    mode, self.base_date.date().toPython()
+                )
             return start.isoformat(), end.isoformat()
         except Exception:
             return None

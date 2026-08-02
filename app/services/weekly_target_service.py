@@ -3,13 +3,12 @@ from __future__ import annotations
 from typing import Any
 
 from app.utils.date_utils import (
-    cycle_week_segments,
     now_iso,
     parse_date,
-    settlement_cycle_for_date,
-    settlement_cycle_from_code,
 )
 from app.utils.validators import safe_decimal, safe_int
+from app.services.settlement_cycle_service import SettlementCycleService
+from app.db.repositories import SettlementCycleRuleRepository
 
 
 class WeeklyTargetService:
@@ -19,16 +18,20 @@ class WeeklyTargetService:
         cycle_target_repo,
         team_repo,
         account_manager_repo,
+        settlement_cycle_service=None,
     ) -> None:
         self.weekly_target_repo = weekly_target_repo
         self.cycle_target_repo = cycle_target_repo
         self.team_repo = team_repo
         self.account_manager_repo = account_manager_repo
+        self.settlement_cycle_service = settlement_cycle_service or SettlementCycleService(
+            SettlementCycleRuleRepository(weekly_target_repo.db)
+        )
 
     def get_cycle_weeks(self, settlement_cycle_code: str) -> list[dict[str, Any]]:
-        cycle = settlement_cycle_from_code(str(settlement_cycle_code or "").strip())
+        cycle = self.settlement_cycle_service.cycle_from_code(str(settlement_cycle_code or "").strip())
         weeks: list[dict[str, Any]] = []
-        for segment in cycle_week_segments(cycle):
+        for segment in self.settlement_cycle_service.cycle_week_segments(cycle):
             week_index = safe_int(segment.get("index"))
             weeks.append(
                 {
@@ -41,7 +44,7 @@ class WeeklyTargetService:
         return weeks
 
     def get_cycle_weeks_by_date(self, record_date: str) -> dict[str, Any]:
-        cycle = settlement_cycle_for_date(parse_date(str(record_date or "").strip()))
+        cycle = self.settlement_cycle_service.cycle_for_date(parse_date(str(record_date or "").strip()))
         return {
             "settlement_cycle_code": cycle.code,
             "cycle_start_date": cycle.start.isoformat(),
@@ -198,14 +201,16 @@ class WeeklyTargetService:
 
         now = now_iso()
         normalized_rows = self._normalize_save_rows(rows_with_week, member_ids, week_map)
-        saved_count = self.weekly_target_repo.replace_targets_for_team_week(
-            team_id=team_id,
-            settlement_cycle_code=settlement_cycle_code,
-            week_index=week_index,
-            rows=normalized_rows,
-            now=now,
-        )
-        self._sync_cycle_targets_from_repo(team_id, settlement_cycle_code, member_ids, now)
+        with self.weekly_target_repo.db.transaction() as conn:
+            saved_count = self.weekly_target_repo.replace_targets_for_team_week(
+                team_id=team_id,
+                settlement_cycle_code=settlement_cycle_code,
+                week_index=week_index,
+                rows=normalized_rows,
+                now=now,
+                conn=conn,
+            )
+            self._sync_cycle_targets_from_repo(team_id, settlement_cycle_code, member_ids, now, conn=conn)
         return {
             "ok": True,
             "saved_count": saved_count,
@@ -240,13 +245,15 @@ class WeeklyTargetService:
         now = now_iso()
         normalized_rows = self._normalize_save_rows(rows, member_ids, week_map)
 
-        saved_count = self.weekly_target_repo.replace_targets_for_team_cycle(
-            team_id=team_id,
-            settlement_cycle_code=settlement_cycle_code,
-            rows=normalized_rows,
-            now=now,
-        )
-        self._sync_cycle_targets(team_id, settlement_cycle_code, member_ids, normalized_rows, now)
+        with self.weekly_target_repo.db.transaction() as conn:
+            saved_count = self.weekly_target_repo.replace_targets_for_team_cycle(
+                team_id=team_id,
+                settlement_cycle_code=settlement_cycle_code,
+                rows=normalized_rows,
+                now=now,
+                conn=conn,
+            )
+            self._sync_cycle_targets(team_id, settlement_cycle_code, member_ids, normalized_rows, now, conn=conn)
 
         return {
             "ok": True,
@@ -346,6 +353,7 @@ class WeeklyTargetService:
         member_ids: set[int],
         rows: list[dict[str, Any]],
         now: str,
+        conn=None,
     ) -> None:
         repayment_by_manager = {manager_id: 0.0 for manager_id in member_ids}
         for row in rows:
@@ -360,6 +368,7 @@ class WeeklyTargetService:
                 settlement_cycle_code=settlement_cycle_code,
                 target_amount=target_amount,
                 now=now,
+                conn=conn,
             )
 
     def _sync_cycle_targets_from_repo(
@@ -368,8 +377,9 @@ class WeeklyTargetService:
         settlement_cycle_code: str,
         member_ids: set[int],
         now: str,
+        conn=None,
     ) -> None:
-        sums = self.weekly_target_repo.sum_targets_by_manager(team_id, settlement_cycle_code)
+        sums = self.weekly_target_repo.sum_targets_by_manager(team_id, settlement_cycle_code, conn=conn)
         for manager_id in member_ids:
             target_amount = safe_decimal(sums.get(manager_id, {}).get("repayment_target"))
             self.cycle_target_repo.upsert_target(
@@ -378,4 +388,5 @@ class WeeklyTargetService:
                 settlement_cycle_code=settlement_cycle_code,
                 target_amount=target_amount,
                 now=now,
+                conn=conn,
             )

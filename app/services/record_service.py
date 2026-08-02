@@ -5,6 +5,7 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any, Dict, List
 
+from app.db.repositories import SettlementCycleRuleRepository
 from app.config.field_profiles import PROFILE_PREVIEW_TABLE, PROFILE_QUERY_SUMMARY_TABLE
 from app.config.field_rules import CONFIGURED_DAILY_AMOUNT_FIELD_KEYS, CONFIGURED_DAILY_INT_FIELD_KEYS
 from app.config.field_registry import (
@@ -26,21 +27,16 @@ from app.fields.formula_service import (
     FORMULA_WARRANT_CONVERSION_RATE,
     FormulaService,
 )
+from app.services.settlement_cycle_service import SettlementCycleService
 from app.fields.registry import PAGE_QUERY_SUMMARY, PAGE_TODAY_DISPLAY
 from app.utils.date_utils import (
-    canonical_cycle_codes_from_dates,
-    cycle_week_for_date,
     now_iso,
     normalize_cycle_code_text,
     parse_date,
-    range_crosses_cycles,
-    resolve_report_range,
-    settlement_cycle_display_code,
-    settlement_cycle_for_date,
 )
 from app.utils.hash_utils import hash_record_payload
 from app.utils.log_utils import get_logger
-from app.utils.metrics_utils import aggregate_daily_rows, ratio_or_none
+from app.utils.metrics_utils import aggregate_daily_rows
 from app.utils.validators import DAILY_AMOUNT_FIELDS, DAILY_INT_FIELDS, safe_decimal, safe_int
 
 
@@ -57,6 +53,7 @@ class RecordService:
         cycle_target_repo,
         template_service,
         field_value_service=None,
+        settlement_cycle_service=None,
     ) -> None:
         self.logger = get_logger("record_service")
         self.record_repo = record_repo
@@ -65,6 +62,9 @@ class RecordService:
         self.cycle_target_repo = cycle_target_repo
         self.template_service = template_service
         self.field_value_service = field_value_service or FieldValueService(record_repo.db)
+        self.settlement_cycle_service = settlement_cycle_service or SettlementCycleService(
+            SettlementCycleRuleRepository(record_repo.db)
+        )
         self.display_config_service = DisplayFieldConfigService(record_repo.db)
         self.formula_service = FormulaService()
         self.aggregation_service = AggregationService(self.formula_service)
@@ -253,9 +253,17 @@ class RecordService:
             metrics[field_key] = self.field_value_service.normalize_value(field_def, None)
         return metrics
 
-    def _normalize_entry_values(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_entry_values(
+        self,
+        payload: dict[str, Any],
+        apply_defaults_for_missing: bool = True,
+    ) -> dict[str, Any]:
         metrics: dict[str, Any] = {}
         for field_key, field_def in self._entry_field_map().items():
+            if field_key not in payload:
+                if apply_defaults_for_missing:
+                    metrics[field_key] = self.field_value_service.normalize_value(field_def, None)
+                continue
             metrics[field_key] = self.field_value_service.normalize_value(field_def, payload.get(field_key))
         return metrics
 
@@ -272,6 +280,34 @@ class RecordService:
             elif storage_type == STORAGE_FIXED_COLUMN or field_key in DAILY_INT_FIELDS or field_key in DAILY_AMOUNT_FIELDS or field_key == "remark":
                 fixed_values[storage_column] = value
         return fixed_values, dynamic_values
+
+    @staticmethod
+    def _effective_fixed_metric_values(
+        existing: dict[str, Any] | None,
+        fixed_values: dict[str, Any],
+        entry_values: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Build the full fixed-field snapshot used for hashing and updates.
+
+        An omitted field means it is not present in the current entry layout;
+        it must retain the existing database value. An explicitly submitted
+        blank value has already been normalized to zero by the caller.
+        """
+        current = existing or {}
+        values: dict[str, Any] = {}
+        for field_key in DAILY_INT_FIELDS:
+            raw_value = fixed_values.get(
+                field_key,
+                current.get(field_key, entry_values.get(field_key, 0)),
+            )
+            values[field_key] = safe_int(raw_value)
+        for field_key in DAILY_AMOUNT_FIELDS:
+            raw_value = fixed_values.get(
+                field_key,
+                current.get(field_key, entry_values.get(field_key, 0.0)),
+            )
+            values[field_key] = safe_decimal(raw_value)
+        return values
 
     def _dynamic_values_changed(self, record_id: int, dynamic_values: dict[str, Any]) -> bool:
         if not dynamic_values:
@@ -513,8 +549,8 @@ class RecordService:
             return {"ok": False, "message": "团队不存在"}
 
         date_obj = parse_date(record_date)
-        cycle = settlement_cycle_for_date(date_obj)
-        week_info = cycle_week_for_date(date_obj)
+        cycle = self.settlement_cycle_service.cycle_for_date(date_obj)
+        week_info = self.settlement_cycle_service.cycle_week_for_date(date_obj)
 
         members = self.account_manager_repo.list_by_team(team_id)
         existing = self.record_repo.list_team_day_records(team_id, record_date)
@@ -549,7 +585,7 @@ class RecordService:
             "ok": True,
             "team": team,
             "record_date": record_date,
-            "cycle_code": settlement_cycle_display_code(record_date=record_date),
+            "cycle_code": self.settlement_cycle_service.cycle_display_code(record_date=record_date),
             "cycle_start": cycle.start.isoformat(),
             "cycle_end": cycle.end_inclusive.isoformat(),
             "week_label": week_info["week_label"],
@@ -576,91 +612,28 @@ class RecordService:
         updated = 0
         skipped = 0
 
-        for row in rows:
-            account_manager_id = safe_int(row.get("account_manager_id"))
-            if account_manager_id <= 0:
-                continue
-
-            member = self.account_manager_repo.get_by_id(account_manager_id)
-            if member is None:
-                continue
-
-            entry_values = self._normalize_entry_values(row)
-            fixed_values, dynamic_values = self._split_storage_values(entry_values)
-            metrics_for_hash = {
-                **{key: fixed_values.get(key, entry_values.get(key, 0)) for key in DAILY_INT_FIELDS},
-                **{key: fixed_values.get(key, entry_values.get(key, 0.0)) for key in DAILY_AMOUNT_FIELDS},
-            }
-            payload = {
-                "record_date": record_date,
-                "region": str(team["region"]),
-                "team_id": int(team["id"]),
-                "team_name_snapshot": str(team["team_name"]),
-                "team_manager_name_snapshot": str(team["team_manager_name"]),
-                "account_manager_id": account_manager_id,
-                "account_manager_name_snapshot": str(member["account_manager_name"]),
-                "settlement_cycle_code": settlement_cycle_display_code(record_date=record_date),
-                "business_key": "|".join(
-                    [
-                        record_date,
-                        str(team["region"]),
-                        str(team["team_name"]),
-                        str(member["account_manager_name"]),
-                    ]
-                ),
-                "remark": str(entry_values.get("remark", row.get("remark", ""))).strip(),
-                "template_version": template_version,
-                "source_type": source_type,
-                "source_file": source_file,
-                **fixed_values,
-                **metrics_for_hash,
-            }
-
-            existing = self.record_repo.get_by_unique(record_date, int(team["id"]), account_manager_id)
-            if existing:
-                next_hash = self.build_record_hash(payload)
-                dynamic_changed = self._dynamic_values_changed(int(existing["id"]), dynamic_values)
-                if str(existing.get("record_hash", "")) == next_hash and not dynamic_changed:
-                    skipped += 1
-                    continue
-
-                self.record_repo.update_by_id(
-                    int(existing["id"]),
-                    {
-                        **fixed_values,
-                        **metrics_for_hash,
-                        "remark": payload["remark"],
-                        "region": payload["region"],
-                        "team_name_snapshot": payload["team_name_snapshot"],
-                        "team_manager_name_snapshot": payload["team_manager_name_snapshot"],
-                        "account_manager_name_snapshot": payload["account_manager_name_snapshot"],
-                        "settlement_cycle_code": payload["settlement_cycle_code"],
-                        "business_key": payload["business_key"],
-                        "version": int(existing.get("version", 1)) + 1,
-                        "updated_at": now,
-                        "template_version": template_version,
-                        "record_hash": next_hash,
-                        "source_type": source_type,
-                        "source_file": source_file,
-                    },
-                )
-                if dynamic_values:
-                    self.field_value_service.set_values(int(existing["id"]), dynamic_values)
-                updated += 1
-                continue
-
-            new_payload = {
-                "record_id": str(uuid.uuid4()),
-                **payload,
-                "version": 1,
-                "created_at": now,
-                "updated_at": now,
-            }
-            new_payload["record_hash"] = self.build_record_hash(new_payload)
-            new_record_id = self.record_repo.insert(new_payload)
-            if dynamic_values:
-                self.field_value_service.set_values(new_record_id, dynamic_values)
-            inserted += 1
+        try:
+            with self.record_repo.db.transaction() as conn:
+                for row in rows:
+                    result = self._save_entry_row(
+                        conn=conn,
+                        team=team,
+                        record_date=record_date,
+                        row=row,
+                        template_version=template_version,
+                        now=now,
+                        source_type=source_type,
+                        source_file=source_file,
+                    )
+                    if result == "inserted":
+                        inserted += 1
+                    elif result == "updated":
+                        updated += 1
+                    elif result == "skipped":
+                        skipped += 1
+        except Exception as exc:  # noqa: BLE001
+            self.logger.exception("保存日报失败，事务已回滚 team_id=%s date=%s", team_id, record_date)
+            return False, "保存失败: {}".format(exc), {"inserted": 0, "updated": 0, "skipped": 0}
 
         message = f"保存完成：新增{inserted}，更新{updated}，跳过{skipped}"
         self.logger.info(
@@ -673,6 +646,110 @@ class RecordService:
             skipped,
         )
         return True, message, {"inserted": inserted, "updated": updated, "skipped": skipped}
+
+    def _save_entry_row(
+        self,
+        conn,
+        team: Dict[str, Any],
+        record_date: str,
+        row: Dict[str, Any],
+        template_version: str,
+        now: str,
+        source_type: str,
+        source_file: str | None,
+    ) -> str:
+        account_manager_id = safe_int(row.get("account_manager_id"))
+        if account_manager_id <= 0:
+            return "ignored"
+
+        member = self.account_manager_repo.get_by_id(account_manager_id)
+        if member is None:
+            return "ignored"
+
+        existing = self.record_repo.get_by_unique(
+            record_date,
+            int(team["id"]),
+            account_manager_id,
+            conn=conn,
+        )
+        entry_values = self._normalize_entry_values(row, apply_defaults_for_missing=existing is None)
+        fixed_values, dynamic_values = self._split_storage_values(entry_values)
+        metrics_for_hash = self._effective_fixed_metric_values(existing, fixed_values, entry_values)
+        if "remark" in entry_values:
+            remark = str(entry_values["remark"] or "").strip()
+        elif existing is not None:
+            remark = str(existing.get("remark", "") or "")
+        else:
+            remark = ""
+
+        payload = {
+            "record_date": record_date,
+            "region": str(team["region"]),
+            "team_id": int(team["id"]),
+            "team_name_snapshot": str(team["team_name"]),
+            "team_manager_name_snapshot": str(team["team_manager_name"]),
+            "account_manager_id": account_manager_id,
+            "account_manager_name_snapshot": str(member["account_manager_name"]),
+            "settlement_cycle_code": self.settlement_cycle_service.cycle_display_code(record_date=record_date),
+            "business_key": "|".join(
+                [
+                    record_date,
+                    str(team["region"]),
+                    str(team["team_name"]),
+                    str(member["account_manager_name"]),
+                ]
+            ),
+            "remark": remark,
+            "template_version": template_version,
+            "source_type": source_type,
+            "source_file": source_file,
+            **fixed_values,
+            **metrics_for_hash,
+        }
+
+        if existing:
+            next_hash = self.build_record_hash(payload)
+            dynamic_changed = self._dynamic_values_changed(int(existing["id"]), dynamic_values)
+            if str(existing.get("record_hash", "")) == next_hash and not dynamic_changed:
+                return "skipped"
+
+            self.record_repo.update_by_id(
+                int(existing["id"]),
+                {
+                    **fixed_values,
+                    **metrics_for_hash,
+                    "remark": payload["remark"],
+                    "region": payload["region"],
+                    "team_name_snapshot": payload["team_name_snapshot"],
+                    "team_manager_name_snapshot": payload["team_manager_name_snapshot"],
+                    "account_manager_name_snapshot": payload["account_manager_name_snapshot"],
+                    "settlement_cycle_code": payload["settlement_cycle_code"],
+                    "business_key": payload["business_key"],
+                    "version": int(existing.get("version", 1)) + 1,
+                    "updated_at": now,
+                    "template_version": template_version,
+                    "record_hash": next_hash,
+                    "source_type": source_type,
+                    "source_file": source_file,
+                },
+                conn=conn,
+            )
+            if dynamic_values:
+                self.field_value_service.set_values(int(existing["id"]), dynamic_values, conn=conn)
+            return "updated"
+
+        new_payload = {
+            "record_id": str(uuid.uuid4()),
+            **payload,
+            "version": 1,
+            "created_at": now,
+            "updated_at": now,
+        }
+        new_payload["record_hash"] = self.build_record_hash(new_payload)
+        new_record_id = self.record_repo.insert(new_payload, conn=conn)
+        if dynamic_values:
+            self.field_value_service.set_values(new_record_id, dynamic_values, conn=conn)
+        return "inserted"
 
     def copy_yesterday_member_order(self, team_id: int, record_date: str) -> list[int]:
         prev_day = parse_date(record_date) - timedelta(days=1)
@@ -711,7 +788,7 @@ class RecordService:
         custom_start_obj = parse_date(custom_start) if custom_start else None
         custom_end_obj = parse_date(custom_end) if custom_end else None
 
-        start_date, end_date = resolve_report_range(
+        start_date, end_date = self.settlement_cycle_service.resolve_report_range(
             mode,
             base_date=date_obj,
             custom_start=custom_start_obj,
@@ -724,15 +801,17 @@ class RecordService:
             team_id=team_id,
         )
 
-        cross_cycle = range_crosses_cycles(start_date, end_date)
+        cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
         team_target = 0.0
         if not cross_cycle:
-            team_target = self._team_target(team_id, settlement_cycle_for_date(start_date).code)
+            team_target = self._team_target(team_id, self.settlement_cycle_service.cycle_for_date(start_date).code)
 
         summary = self._aggregate(rows, team_target=team_target, include_progress=not cross_cycle)
-        cycle_codes = canonical_cycle_codes_from_dates([str(row.get("record_date", "")) for row in rows])
+        cycle_codes = self.settlement_cycle_service.canonical_cycle_codes_from_dates(
+            [str(row.get("record_date", "")) for row in rows]
+        )
         if not cycle_codes and not cross_cycle:
-            cycle_codes = [settlement_cycle_for_date(start_date).code]
+            cycle_codes = [self.settlement_cycle_service.cycle_for_date(start_date).code]
 
         return {
             "start_date": start_date.isoformat(),
@@ -744,10 +823,8 @@ class RecordService:
         }
 
     def list_week_options(self, record_date: str) -> list[dict[str, str]]:
-        cycle = settlement_cycle_for_date(parse_date(record_date))
-        from app.utils.date_utils import cycle_week_segments
-
-        return cycle_week_segments(cycle)
+        cycle = self.settlement_cycle_service.cycle_for_date(parse_date(record_date))
+        return self.settlement_cycle_service.cycle_week_segments(cycle)
 
     def group_by_account_manager(self, rows: list[dict[str, Any]], team_target_map: dict[int, float] | None = None) -> list[dict[str, Any]]:
         grouped: dict[int, dict[str, Any]] = {}
@@ -777,7 +854,7 @@ class RecordService:
     def get_preview_rows(self, team_id: int, record_date: str) -> list[dict[str, Any]]:
         """今日展示：一人一行，包含当日值与截至当日的周期累计。"""
         day = parse_date(record_date)
-        cycle = settlement_cycle_for_date(day)
+        cycle = self.settlement_cycle_service.cycle_for_date(day)
 
         members = self.account_manager_repo.list_by_team(team_id)
         today_rows = self.record_repo.list_team_day_records(team_id, record_date)
@@ -817,7 +894,7 @@ class RecordService:
                 "account_manager_id": manager_id,
                 "record_date": record_date,
                 "account_manager_name": manager_name,
-                "settlement_cycle_code": settlement_cycle_display_code(record_date=record_date),
+                "settlement_cycle_code": self.settlement_cycle_service.cycle_display_code(record_date=record_date),
                 "cycle_target": cycle_target,
                 "repayment_amount_cumulative": float(cumulative.get("repayment_amount_daily", 0) or 0),
                 "loan_amount_cumulative": float(cumulative.get("loan_amount_daily", 0) or 0),
@@ -861,7 +938,9 @@ class RecordService:
         base = parse_date(base_date)
         custom_start_obj = parse_date(custom_start) if custom_start else None
         custom_end_obj = parse_date(custom_end) if custom_end else None
-        start_date, end_date = resolve_report_range(mode, base, custom_start_obj, custom_end_obj)
+        start_date, end_date = self.settlement_cycle_service.resolve_report_range(
+            mode, base, custom_start_obj, custom_end_obj
+        )
 
         explicit_team_ids: list[int] = []
         if team_ids is not None:
@@ -870,15 +949,15 @@ class RecordService:
             explicit_team_ids = [int(team_id)]
 
         if team_ids is not None and not explicit_team_ids:
-            cross_cycle = range_crosses_cycles(start_date, end_date)
-            cycle_code = settlement_cycle_for_date(start_date).code
+            cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
+            cycle_code = self.settlement_cycle_service.cycle_for_date(start_date).code
             query_range = f"{start_date.isoformat()} ~ {end_date.isoformat()}"
             return {
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "query_range": query_range,
                 "cross_cycle": cross_cycle,
-                "cycle_code": "" if cross_cycle else settlement_cycle_display_code(cycle_code=cycle_code),
+                "cycle_code": "" if cross_cycle else self.settlement_cycle_service.cycle_display_code(cycle_code=cycle_code),
                 "queried_all_teams": False,
                 "rows": [],
                 "summary": self._build_query_summary_aggregate([], team_target=0.0, cross_cycle=cross_cycle),
@@ -893,8 +972,8 @@ class RecordService:
             team_ids=team_ids_filter,
         )
 
-        cross_cycle = range_crosses_cycles(start_date, end_date)
-        cycle_code = settlement_cycle_for_date(start_date).code
+        cross_cycle = self.settlement_cycle_service.range_crosses_cycles(start_date, end_date)
+        cycle_code = self.settlement_cycle_service.cycle_for_date(start_date).code
         query_range = f"{start_date.isoformat()} ~ {end_date.isoformat()}"
 
         grouped: dict[str, dict[str, Any]] = {}
@@ -968,7 +1047,7 @@ class RecordService:
                 "team_name": manager_team_name,
                 "account_manager_id": manager_id,
                 "account_manager_name": display_name,
-                "settlement_cycle_code": "" if cross_cycle else settlement_cycle_display_code(cycle_code=cycle_code),
+                "settlement_cycle_code": "" if cross_cycle else self.settlement_cycle_service.cycle_display_code(cycle_code=cycle_code),
                 "cycle_target": cycle_target,
                 "cycle_repayment_target": cycle_target,
                 "repayment_amount_cumulative": repayment_amount,
@@ -1023,7 +1102,7 @@ class RecordService:
             "end_date": end_date.isoformat(),
             "query_range": query_range,
             "cross_cycle": cross_cycle,
-            "cycle_code": "" if cross_cycle else settlement_cycle_display_code(cycle_code=cycle_code),
+            "cycle_code": "" if cross_cycle else self.settlement_cycle_service.cycle_display_code(cycle_code=cycle_code),
             "queried_all_teams": not explicit_team_ids,
             "rows": result_rows,
             "summary": summary,

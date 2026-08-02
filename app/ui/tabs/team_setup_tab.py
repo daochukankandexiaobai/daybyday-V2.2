@@ -2,6 +2,7 @@
 
 from app.ui.layout_profile import LayoutProfile
 from app.ui.weekly_target_dialog import WeeklyTargetDialog
+from app.utils.date_utils import settlement_cycle_for_date
 from app.utils.qt_compat import QDate, Qt, Signal, dialog_exec
 from app.utils.qt_compat import (
     QDateEdit,
@@ -25,7 +26,6 @@ from app.utils.qt_compat import (
     QWidget,
 )
 
-from app.utils.date_utils import settlement_cycle_for_date
 from app.utils.validators import validate_non_negative_decimal_input
 
 
@@ -39,6 +39,7 @@ class TeamSetupTab(QWidget):
         weekly_target_service=None,
         admin_team_service=None,
         operator_getter=None,
+        settlement_cycle_service=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -46,6 +47,7 @@ class TeamSetupTab(QWidget):
         self.weekly_target_service = weekly_target_service
         self.admin_team_service = admin_team_service
         self.operator_getter = operator_getter or (lambda: "admin")
+        self.settlement_cycle_service = settlement_cycle_service
         self.current_team_id: int | None = None
         self.teams: list[dict] = []
         self._is_new_team_mode = False
@@ -320,7 +322,10 @@ class TeamSetupTab(QWidget):
         header.resizeSection(1, max(120, int(current_w)))
 
     def _cycle_code(self) -> str:
-        cycle = settlement_cycle_for_date(self.cycle_base_date.date().toPython())
+        if self.settlement_cycle_service is None:
+            cycle = settlement_cycle_for_date(self.cycle_base_date.date().toPython())
+        else:
+            cycle = self.settlement_cycle_service.cycle_for_date(self.cycle_base_date.date().toPython())
         return cycle.code
 
     def _set_mode(self, is_new: bool) -> None:

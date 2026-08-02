@@ -23,7 +23,7 @@ pip install -r requirements-dev.txt
 
 ### 3.2 打包（目录版，推荐）
 ```powershell
-pyinstaller --noconfirm --clean --windowed --onedir --name TeamReportAppWin7 --add-data "assets;assets" main.py
+.\scripts\build_win7_dist.ps1
 ```
 
 输出目录：`dist\TeamReportAppWin7\`

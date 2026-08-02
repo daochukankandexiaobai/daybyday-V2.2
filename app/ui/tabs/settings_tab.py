@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 
 from app.utils.qt_compat import Signal
@@ -13,6 +14,7 @@ from app.utils.qt_compat import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -20,6 +22,7 @@ from app.utils.qt_compat import (
 
 class SettingsTab(QWidget):
     view_scale_changed = Signal(str)
+    settlement_cycle_rule_changed = Signal()
 
     def __init__(
         self,
@@ -28,6 +31,8 @@ class SettingsTab(QWidget):
         template_service,
         view_scale_service,
         db_path: str,
+        settlement_cycle_service=None,
+        operator_getter=None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -36,6 +41,8 @@ class SettingsTab(QWidget):
         self.template_service = template_service
         self.view_scale_service = view_scale_service
         self.db_path = db_path
+        self.settlement_cycle_service = settlement_cycle_service
+        self.operator_getter = operator_getter or (lambda: "admin")
         self._build_ui()
         self.load_settings()
 
@@ -72,6 +79,43 @@ class SettingsTab(QWidget):
         self.save_basic_btn = QPushButton("保存设置")
         basic_layout.addRow(self.save_basic_btn)
 
+        self.cycle_rule_group = QGroupBox("结算周期规则")
+        cycle_layout = QFormLayout(self.cycle_rule_group)
+        self.cycle_mode_combo = QComboBox()
+        self.cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
+        self.cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
+        self.cycle_start_day_spin = QSpinBox()
+        self.cycle_start_day_spin.setRange(1, 28)
+        self.cycle_start_day_spin.setValue(1)
+        self.cycle_rule_status_label = QLabel("-")
+        self.cycle_rule_preview_label = QLabel("-")
+        self.cycle_rule_preview_label.setWordWrap(True)
+        self.save_cycle_rule_btn = QPushButton("保存周期规则")
+        self.save_cycle_rule_btn.setProperty("buttonRole", "primary")
+        self.lock_cycle_rule_btn = QPushButton("确认并锁定")
+        self.lock_cycle_rule_btn.setProperty("buttonRole", "danger")
+
+        cycle_button_row = QHBoxLayout()
+        cycle_button_row.setContentsMargins(0, 0, 0, 0)
+        cycle_button_row.setSpacing(6)
+        cycle_button_row.addWidget(self.save_cycle_rule_btn)
+        cycle_button_row.addWidget(self.lock_cycle_rule_btn)
+        cycle_button_row.addStretch()
+
+        cycle_hint = QLabel(
+            "规则仅可在尚未录入日报、周目标或周期目标时调整；确认锁定后，"
+            "系统不会重新归类历史数据。"
+        )
+        cycle_hint.setWordWrap(True)
+        cycle_hint.setObjectName("statusText")
+
+        cycle_layout.addRow("周期模式", self.cycle_mode_combo)
+        cycle_layout.addRow("自定义起始日", self.cycle_start_day_spin)
+        cycle_layout.addRow("当前状态", self.cycle_rule_status_label)
+        cycle_layout.addRow("周期预览", self.cycle_rule_preview_label)
+        cycle_layout.addRow(cycle_hint)
+        cycle_layout.addRow(cycle_button_row)
+
         info_group = QGroupBox("系统信息")
         info_layout = QFormLayout(info_group)
         self.db_path_label = QLabel(self.db_path)
@@ -102,6 +146,7 @@ class SettingsTab(QWidget):
         password_layout.addRow(self.change_pwd_btn)
 
         root.addWidget(basic_group)
+        root.addWidget(self.cycle_rule_group)
         root.addWidget(info_group)
         root.addWidget(password_group)
         root.addStretch()
@@ -110,6 +155,10 @@ class SettingsTab(QWidget):
         self.save_basic_btn.clicked.connect(self.on_save_basic)
         self.change_pwd_btn.clicked.connect(self.on_change_password)
         self.apply_view_scale_btn.clicked.connect(self.on_apply_view_scale)
+        self.cycle_mode_combo.currentIndexChanged.connect(self.on_cycle_mode_changed)
+        self.cycle_start_day_spin.valueChanged.connect(self._refresh_cycle_rule_preview)
+        self.save_cycle_rule_btn.clicked.connect(self.on_save_cycle_rule)
+        self.lock_cycle_rule_btn.clicked.connect(self.on_lock_cycle_rule)
 
     def load_settings(self) -> None:
         self.company_name_edit.setText(self.settings_service.get("company_name", "示例公司"))
@@ -125,6 +174,125 @@ class SettingsTab(QWidget):
         self.current_template_label.setText(self.template_service.get_active_template_version())
         self.schema_version_label.setText(self.settings_service.get_schema_version() or "-")
         self.rules_version_label.setText(self.settings_service.get_business_rules_version() or "-")
+        self._load_cycle_rule()
+
+    def _operator(self) -> str:
+        return str(self.operator_getter() or "admin")
+
+    def _load_cycle_rule(self) -> None:
+        if self.settlement_cycle_service is None:
+            self.cycle_rule_group.setVisible(False)
+            return
+
+        status = self.settlement_cycle_service.get_rule_status()
+        mode = str(status.get("rule_mode", "calendar_month") or "calendar_month")
+        if mode == "legacy_29":
+            self.cycle_mode_combo.clear()
+            self.cycle_mode_combo.addItem("历史兼容：每月29日至次月28日", "legacy_29")
+        elif self.cycle_mode_combo.count() == 1:
+            self.cycle_mode_combo.addItem("自然月：每月1日至月底", "calendar_month")
+            self.cycle_mode_combo.addItem("自定义：每月指定日期至次月前一日", "fixed_start_day")
+
+        index = self.cycle_mode_combo.findData(mode)
+        self.cycle_mode_combo.blockSignals(True)
+        self.cycle_mode_combo.setCurrentIndex(max(0, index))
+        self.cycle_mode_combo.blockSignals(False)
+        self.cycle_start_day_spin.setValue(int(status.get("start_day", 1) or 1))
+
+        locked = bool(status.get("is_locked", False))
+        has_business_data = bool(status.get("has_business_data", False))
+        editable = bool(status.get("is_editable", False))
+        label = str(status.get("label", "-") or "-")
+        if locked:
+            state_text = "已锁定：{}".format(label)
+        elif has_business_data:
+            state_text = "已有业务数据，规则已受保护：{}".format(label)
+        else:
+            state_text = "待确认：{}".format(label)
+        self.cycle_rule_status_label.setText(state_text)
+        self.cycle_mode_combo.setEnabled(editable and mode != "legacy_29")
+        self.cycle_start_day_spin.setEnabled(editable and mode == "fixed_start_day")
+        self.save_cycle_rule_btn.setEnabled(editable and mode != "legacy_29")
+        self.lock_cycle_rule_btn.setEnabled(editable and mode != "legacy_29")
+        self._refresh_cycle_rule_preview()
+
+    def on_cycle_mode_changed(self, *_args) -> None:
+        mode = str(self.cycle_mode_combo.currentData() or "calendar_month")
+        if mode == "calendar_month":
+            self.cycle_start_day_spin.setValue(1)
+        status = self.settlement_cycle_service.get_rule_status() if self.settlement_cycle_service else {}
+        self.cycle_start_day_spin.setEnabled(mode == "fixed_start_day" and bool(status.get("is_editable", False)))
+        self._refresh_cycle_rule_preview()
+
+    def _refresh_cycle_rule_preview(self, *_args) -> None:
+        if self.settlement_cycle_service is None:
+            return
+        mode = str(self.cycle_mode_combo.currentData() or "calendar_month")
+        start_day = int(self.cycle_start_day_spin.value())
+        try:
+            if mode == "legacy_29":
+                preview = self.settlement_cycle_service.preview_cycles(date.today(), 3)
+            else:
+                from app.utils.date_utils import normalize_settlement_cycle_rule, settlement_cycle_for_date
+
+                candidate = normalize_settlement_cycle_rule(
+                    {"rule_mode": mode, "start_day": start_day}
+                )
+                current = settlement_cycle_for_date(date.today(), candidate)
+                preview = []
+                for _index in range(3):
+                    preview.append(
+                        {
+                            "cycle_code": current.code,
+                            "start_date": current.start.isoformat(),
+                            "end_date": current.end_inclusive.isoformat(),
+                        }
+                    )
+                    current = settlement_cycle_for_date(current.end_exclusive, candidate)
+            text = "； ".join(
+                "{}（{} ~ {}）".format(item["cycle_code"], item["start_date"], item["end_date"])
+                for item in preview
+            )
+        except (TypeError, ValueError):
+            text = "请输入有效的周期起始日"
+        self.cycle_rule_preview_label.setText(text)
+
+    def on_save_cycle_rule(self) -> None:
+        if self.settlement_cycle_service is None:
+            return
+        mode = str(self.cycle_mode_combo.currentData() or "calendar_month")
+        ok, message, _status = self.settlement_cycle_service.update_initial_rule(
+            mode,
+            int(self.cycle_start_day_spin.value()),
+            self._operator(),
+        )
+        if not ok:
+            QMessageBox.warning(self, "无法保存", message)
+            self._load_cycle_rule()
+            return
+        QMessageBox.information(self, "提示", message)
+        self._load_cycle_rule()
+        self.settlement_cycle_rule_changed.emit()
+
+    def on_lock_cycle_rule(self) -> None:
+        if self.settlement_cycle_service is None:
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认锁定周期规则",
+            "锁定后不能在系统内直接修改结算周期规则，且不会重算历史数据。确定继续吗？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        ok, message, _status = self.settlement_cycle_service.lock_active_rule(self._operator())
+        if ok:
+            QMessageBox.information(self, "提示", message)
+            self._load_cycle_rule()
+            self.settlement_cycle_rule_changed.emit()
+        else:
+            QMessageBox.warning(self, "锁定失败", message)
 
     def on_browse_export_dir(self) -> None:
         path = QFileDialog.getExistingDirectory(
@@ -192,3 +360,4 @@ class SettingsTab(QWidget):
             self.confirm_password_edit,
         ]:
             edit.setMinimumHeight(max(20, int(round(30 * factor))))
+        self.cycle_start_day_spin.setMinimumHeight(max(20, int(round(30 * factor))))

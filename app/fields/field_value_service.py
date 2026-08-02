@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
 from app.config.field_registry import (
     DATA_TYPE_AMOUNT,
@@ -50,31 +51,45 @@ class FieldValueService:
 
         return record.get(field_key, self.normalize_value(field_def, None))
 
-    def set_value(self, record_id: int, field_key: str, value: Any) -> None:
+    def set_value(
+        self,
+        record_id: int,
+        field_key: str,
+        value: Any,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
         normalized_record_id = int(record_id or 0)
         if normalized_record_id <= 0:
             raise ValueError("record_id 必须为正整数")
 
-        field_def = self._get_field_def(field_key)
+        field_def = self._get_field_def(field_key, conn=conn)
         normalized = self.normalize_value(field_def, value)
         storage_type = self._storage_type(field_def)
         storage_column = self._storage_column(field_def, field_key)
 
         if storage_type == STORAGE_FIXED_COLUMN:
-            if not self._is_daily_record_column(storage_column):
+            if not self._is_daily_record_column(storage_column, conn=conn):
                 raise ValueError("固定列不存在: {}".format(storage_column))
-            with self.db.get_connection() as conn:
+            if conn is not None:
                 conn.execute(
                     "UPDATE daily_records SET {} = ?, updated_at = ? WHERE id = ?".format(
                         self._quote_identifier(storage_column)
                     ),
                     (normalized, _now_str(), normalized_record_id),
                 )
-                conn.commit()
+                return
+            with self.db.get_connection() as local_conn:
+                local_conn.execute(
+                    "UPDATE daily_records SET {} = ?, updated_at = ? WHERE id = ?".format(
+                        self._quote_identifier(storage_column)
+                    ),
+                    (normalized, _now_str(), normalized_record_id),
+                )
+                local_conn.commit()
             return
 
         if storage_type == STORAGE_DYNAMIC_METRIC:
-            self._upsert_dynamic_value(normalized_record_id, field_key, field_def, normalized)
+            self._upsert_dynamic_value(normalized_record_id, field_key, field_def, normalized, conn=conn)
             return
 
         if storage_type in {STORAGE_COMPUTED, STORAGE_DISPLAY_ONLY}:
@@ -85,9 +100,14 @@ class FieldValueService:
         record = self.read_record_with_dynamic_values(record_id)
         return {field_key: self.get_value(record, field_key) for field_key in field_keys}
 
-    def set_values(self, record_id: int, values_dict: Dict[str, Any]) -> None:
+    def set_values(
+        self,
+        record_id: int,
+        values_dict: Dict[str, Any],
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
         for field_key, value in values_dict.items():
-            self.set_value(record_id, field_key, value)
+            self.set_value(record_id, field_key, value, conn=conn)
 
     def read_record_with_dynamic_values(self, record_id: int) -> Dict[str, Any]:
         normalized_record_id = int(record_id or 0)
@@ -163,14 +183,20 @@ class FieldValueService:
 
         return True, ""
 
-    def _get_field_def(self, field_key: str) -> Dict[str, Any]:
-        with self.db.get_connection() as conn:
-            row = conn.execute(
-                "SELECT * FROM field_definitions WHERE field_key = ?",
-                (field_key,),
-            ).fetchone()
-            if row is not None:
-                return dict(row)
+    def _get_field_def(
+        self,
+        field_key: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> Dict[str, Any]:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                return self._get_field_def(field_key, conn=local_conn)
+        row = conn.execute(
+            "SELECT * FROM field_definitions WHERE field_key = ?",
+            (field_key,),
+        ).fetchone()
+        if row is not None:
+            return dict(row)
 
         spec = get_field(field_key)
         if spec is None:
@@ -234,7 +260,14 @@ class FieldValueService:
                 return row["value_text"]
             return row["value_number"]
 
-    def _upsert_dynamic_value(self, record_id: int, field_key: str, field_def: Any, value: Any) -> None:
+    def _upsert_dynamic_value(
+        self,
+        record_id: int,
+        field_key: str,
+        field_def: Any,
+        value: Any,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> None:
         data_type = self._data_type(field_def)
         if data_type in {DATA_TYPE_INT} | DECIMAL_DATA_TYPES:
             value_number = float(value or 0)
@@ -244,7 +277,7 @@ class FieldValueService:
             value_text = str(value or "")
 
         now = _now_str()
-        with self.db.get_connection() as conn:
+        if conn is not None:
             conn.execute(
                 """
                 INSERT INTO daily_metric_values (
@@ -258,12 +291,33 @@ class FieldValueService:
                 """,
                 (record_id, field_key, value_number, value_text, now, now),
             )
-            conn.commit()
+            return
+        with self.db.get_connection() as local_conn:
+            local_conn.execute(
+                """
+                INSERT INTO daily_metric_values (
+                    record_id, field_key, value_number, value_text, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(record_id, field_key) DO UPDATE SET
+                    value_number = excluded.value_number,
+                    value_text = excluded.value_text,
+                    updated_at = excluded.updated_at
+                """,
+                (record_id, field_key, value_number, value_text, now, now),
+            )
+            local_conn.commit()
 
-    def _is_daily_record_column(self, column_name: str) -> bool:
-        with self.db.get_connection() as conn:
-            rows = conn.execute("PRAGMA table_info(daily_records)").fetchall()
-            columns = {str(row["name"]) for row in rows}
+    def _is_daily_record_column(
+        self,
+        column_name: str,
+        conn: Optional[sqlite3.Connection] = None,
+    ) -> bool:
+        if conn is None:
+            with self.db.get_connection() as local_conn:
+                return self._is_daily_record_column(column_name, conn=local_conn)
+        rows = conn.execute("PRAGMA table_info(daily_records)").fetchall()
+        columns = {str(row["name"]) for row in rows}
         return column_name in columns
 
     @staticmethod

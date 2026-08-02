@@ -20,7 +20,6 @@ from app.utils.qt_compat import (
     QWidget,
 )
 
-from app.utils.date_utils import settlement_cycle_display_code
 from app.utils.format_utils import format_int, format_money, format_percent
 from app.utils.log_utils import get_logger
 
@@ -371,7 +370,11 @@ class PreviewTab(QWidget):
         self._current_render_rows = []
         self._current_cell_styles = []
 
-        cycle_code = rows[0].get("settlement_cycle_code", "") if rows else settlement_cycle_display_code(record_date=record_date)
+        cycle_code = (
+            rows[0].get("settlement_cycle_code", "")
+            if rows
+            else self.record_service.settlement_cycle_service.cycle_display_code(record_date=record_date)
+        )
         self._current_cycle_code = str(cycle_code or "")
         self.cycle_label.setText(f"结算周期：{self._current_cycle_code or '-'}")
 
@@ -427,7 +430,9 @@ class PreviewTab(QWidget):
         team_name = str(team.get("team_name", ""))
         team_manager_name = str(team.get("team_manager_name", ""))
         record_date = self.date_edit.date().toString("yyyy-MM-dd")
-        cycle_code = self._current_cycle_code or settlement_cycle_display_code(record_date=record_date)
+        cycle_code = self._current_cycle_code or self.record_service.settlement_cycle_service.cycle_display_code(
+            record_date=record_date
+        )
 
         try:
             result = self.report_image_service.export_today_preview_bundle(

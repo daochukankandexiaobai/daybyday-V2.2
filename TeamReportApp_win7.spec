@@ -9,7 +9,6 @@ a = Analysis(
     binaries=[],
     datas=[
         ('assets', 'assets'),
-        ('samples', 'samples'),
     ],
     hiddenimports=[],
     hookspath=[],
@@ -34,6 +33,7 @@ exe = EXE(
     strip=False,
     upx=True,
     console=False,
+    icon=['assets\\yinshui.ico'],
 )
 
 coll = COLLECT(
